@@ -1,0 +1,20 @@
+name: Check Build
+
+on:
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  linux_build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Linux Build Check
+      run: make build
+      
+  windows_build:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Windows Build Check
+      run: make build

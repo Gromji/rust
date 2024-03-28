@@ -1,4 +1,4 @@
-name: Check Build
+name: Check rustc_codegen_c Build
 
 on:
   pull_request:
@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
+    - name: Change directory
+      run: cd compiler/rustc_codegen_c
     - name: Linux Build Check
       run: make build
       
@@ -16,5 +18,7 @@ jobs:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v3
+    - name: Change directory
+      run: cd compiler/rustc_codegen_c
     - name: Windows Build Check
       run: make build

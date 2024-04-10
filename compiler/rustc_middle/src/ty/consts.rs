@@ -23,7 +23,7 @@ pub use valtree::*;
 pub type ConstKind<'tcx> = IrConstKind<TyCtxt<'tcx>>;
 
 /// Use this rather than `ConstData`, whenever possible.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, HashStable)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, HashStable)]
 #[rustc_pass_by_value]
 pub struct Const<'tcx>(pub(super) Interned<'tcx, WithCachedTypeInfo<ConstData<'tcx>>>);
 
@@ -52,14 +52,14 @@ impl<'tcx> ConstTy<TyCtxt<'tcx>> for Const<'tcx> {
 }
 
 /// Typed constant value.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 #[derive(HashStable, TyEncodable, TyDecodable)]
 pub struct ConstData<'tcx> {
     pub ty: Ty<'tcx>,
     pub kind: ConstKind<'tcx>,
 }
 
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
 static_assert_size!(ConstData<'_>, 40);
 
 impl<'tcx> Const<'tcx> {

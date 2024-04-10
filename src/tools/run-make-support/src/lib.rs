@@ -1,159 +1,117 @@
+pub mod cc;
+pub mod run;
+pub mod rustc;
+pub mod rustdoc;
+
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+pub use object;
 pub use wasmparser;
 
-pub fn out_dir() -> PathBuf {
+pub use cc::{cc, extra_c_flags, extra_cxx_flags, Cc};
+pub use run::{run, run_fail};
+pub use rustc::{aux_build, rustc, Rustc};
+pub use rustdoc::{bare_rustdoc, rustdoc, Rustdoc};
+
+/// Path of `TMPDIR` (a temporary build directory, not under `/tmp`).
+pub fn tmp_dir() -> PathBuf {
     env::var_os("TMPDIR").unwrap().into()
 }
 
-fn setup_common_build_cmd() -> Command {
-    let rustc = env::var("RUSTC").unwrap();
-    let mut cmd = Command::new(rustc);
-    cmd.arg("--out-dir").arg(out_dir()).arg("-L").arg(out_dir());
-    cmd
+/// `TARGET`
+pub fn target() -> String {
+    env::var("TARGET").unwrap()
+}
+
+/// Check if target is windows-like.
+pub fn is_windows() -> bool {
+    env::var_os("IS_WINDOWS").is_some()
+}
+
+/// Check if target uses msvc.
+pub fn is_msvc() -> bool {
+    env::var_os("IS_MSVC").is_some()
+}
+
+/// Construct a path to a static library under `$TMPDIR` given the library name. This will return a
+/// path with `$TMPDIR` joined with platform-and-compiler-specific library name.
+pub fn static_lib(name: &str) -> PathBuf {
+    tmp_dir().join(static_lib_name(name))
+}
+
+/// Construct the static library name based on the platform.
+pub fn static_lib_name(name: &str) -> String {
+    // See tools.mk (irrelevant lines omitted):
+    //
+    // ```makefile
+    // ifeq ($(UNAME),Darwin)
+    //     STATICLIB = $(TMPDIR)/lib$(1).a
+    // else
+    //     ifdef IS_WINDOWS
+    //         ifdef IS_MSVC
+    //             STATICLIB = $(TMPDIR)/$(1).lib
+    //         else
+    //             STATICLIB = $(TMPDIR)/lib$(1).a
+    //         endif
+    //     else
+    //         STATICLIB = $(TMPDIR)/lib$(1).a
+    //     endif
+    // endif
+    // ```
+    assert!(!name.contains(char::is_whitespace), "name cannot contain whitespace");
+
+    if target().contains("msvc") { format!("{name}.lib") } else { format!("lib{name}.a") }
+}
+
+/// Construct the binary name based on platform.
+pub fn bin_name(name: &str) -> String {
+    if is_windows() { format!("{name}.exe") } else { name.to_string() }
+}
+
+/// Use `cygpath -w` on a path to get a Windows path string back. This assumes that `cygpath` is
+/// available on the platform!
+#[track_caller]
+pub fn cygpath_windows<P: AsRef<Path>>(path: P) -> String {
+    let caller_location = std::panic::Location::caller();
+    let caller_line_number = caller_location.line();
+
+    let mut cygpath = Command::new("cygpath");
+    cygpath.arg("-w");
+    cygpath.arg(path.as_ref());
+    let output = cygpath.output().unwrap();
+    if !output.status.success() {
+        handle_failed_output(&format!("{:#?}", cygpath), output, caller_line_number);
+    }
+    let s = String::from_utf8(output.stdout).unwrap();
+    // cygpath -w can attach a newline
+    s.trim().to_string()
+}
+
+/// Run `uname`. This assumes that `uname` is available on the platform!
+#[track_caller]
+pub fn uname() -> String {
+    let caller_location = std::panic::Location::caller();
+    let caller_line_number = caller_location.line();
+
+    let mut uname = Command::new("uname");
+    let output = uname.output().unwrap();
+    if !output.status.success() {
+        handle_failed_output(&format!("{:#?}", uname), output, caller_line_number);
+    }
+    String::from_utf8(output.stdout).unwrap()
 }
 
 fn handle_failed_output(cmd: &str, output: Output, caller_line_number: u32) -> ! {
-    eprintln!("command failed at line {caller_line_number}");
+    if output.status.success() {
+        eprintln!("command incorrectly succeeded at line {caller_line_number}");
+    } else {
+        eprintln!("command failed at line {caller_line_number}");
+    }
     eprintln!("{cmd}");
     eprintln!("output status: `{}`", output.status);
     eprintln!("=== STDOUT ===\n{}\n\n", String::from_utf8(output.stdout).unwrap());
     eprintln!("=== STDERR ===\n{}\n\n", String::from_utf8(output.stderr).unwrap());
     std::process::exit(1)
-}
-
-pub fn rustc() -> RustcInvocationBuilder {
-    RustcInvocationBuilder::new()
-}
-
-pub fn aux_build() -> AuxBuildInvocationBuilder {
-    AuxBuildInvocationBuilder::new()
-}
-
-#[derive(Debug)]
-pub struct RustcInvocationBuilder {
-    cmd: Command,
-}
-
-impl RustcInvocationBuilder {
-    fn new() -> Self {
-        let cmd = setup_common_build_cmd();
-        Self { cmd }
-    }
-
-    pub fn arg(&mut self, arg: &str) -> &mut RustcInvocationBuilder {
-        self.cmd.arg(arg);
-        self
-    }
-
-    pub fn args(&mut self, args: &[&str]) -> &mut RustcInvocationBuilder {
-        self.cmd.args(args);
-        self
-    }
-
-    #[track_caller]
-    pub fn run(&mut self) -> Output {
-        let caller_location = std::panic::Location::caller();
-        let caller_line_number = caller_location.line();
-
-        let output = self.cmd.output().unwrap();
-        if !output.status.success() {
-            handle_failed_output(&format!("{:#?}", self.cmd), output, caller_line_number);
-        }
-        output
-    }
-}
-
-#[derive(Debug)]
-pub struct AuxBuildInvocationBuilder {
-    cmd: Command,
-}
-
-impl AuxBuildInvocationBuilder {
-    fn new() -> Self {
-        let mut cmd = setup_common_build_cmd();
-        cmd.arg("--crate-type=lib");
-        Self { cmd }
-    }
-
-    pub fn arg(&mut self, arg: &str) -> &mut AuxBuildInvocationBuilder {
-        self.cmd.arg(arg);
-        self
-    }
-
-    #[track_caller]
-    pub fn run(&mut self) -> Output {
-        let caller_location = std::panic::Location::caller();
-        let caller_line_number = caller_location.line();
-
-        let output = self.cmd.output().unwrap();
-        if !output.status.success() {
-            handle_failed_output(&format!("{:#?}", self.cmd), output, caller_line_number);
-        }
-        output
-    }
-}
-
-fn run_common(bin_name: &str) -> (Command, Output) {
-    let target = env::var("TARGET").unwrap();
-
-    let bin_name =
-        if target.contains("windows") { format!("{}.exe", bin_name) } else { bin_name.to_owned() };
-
-    let mut bin_path = PathBuf::new();
-    bin_path.push(env::var("TMPDIR").unwrap());
-    bin_path.push(&bin_name);
-    let ld_lib_path_envvar = env::var("LD_LIB_PATH_ENVVAR").unwrap();
-    let mut cmd = Command::new(bin_path);
-    cmd.env(&ld_lib_path_envvar, {
-        let mut paths = vec![];
-        paths.push(PathBuf::from(env::var("TMPDIR").unwrap()));
-        for p in env::split_paths(&env::var("TARGET_RPATH_ENV").unwrap()) {
-            paths.push(p.to_path_buf());
-        }
-        for p in env::split_paths(&env::var(&ld_lib_path_envvar).unwrap()) {
-            paths.push(p.to_path_buf());
-        }
-        env::join_paths(paths.iter()).unwrap()
-    });
-
-    if target.contains("windows") {
-        let mut paths = vec![];
-        for p in env::split_paths(&std::env::var("PATH").unwrap_or(String::new())) {
-            paths.push(p.to_path_buf());
-        }
-        paths.push(Path::new(&std::env::var("TARGET_RPATH_DIR").unwrap()).to_path_buf());
-        cmd.env("PATH", env::join_paths(paths.iter()).unwrap());
-    }
-
-    let output = cmd.output().unwrap();
-    (cmd, output)
-}
-
-/// Run a built binary and make sure it succeeds.
-#[track_caller]
-pub fn run(bin_name: &str) -> Output {
-    let caller_location = std::panic::Location::caller();
-    let caller_line_number = caller_location.line();
-
-    let (cmd, output) = run_common(bin_name);
-    if !output.status.success() {
-        handle_failed_output(&format!("{:#?}", cmd), output, caller_line_number);
-    }
-    output
-}
-
-/// Run a built binary and make sure it fails.
-#[track_caller]
-pub fn run_fail(bin_name: &str) -> Output {
-    let caller_location = std::panic::Location::caller();
-    let caller_line_number = caller_location.line();
-
-    let (cmd, output) = run_common(bin_name);
-    if output.status.success() {
-        handle_failed_output(&format!("{:#?}", cmd), output, caller_line_number);
-    }
-    output
 }

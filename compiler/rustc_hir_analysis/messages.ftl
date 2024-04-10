@@ -295,6 +295,8 @@ hir_analysis_not_supported_delegation =
     {$descr} is not supported yet
     .label = callee defined here
 
+hir_analysis_only_current_traits_adt = `{$name}` is not defined in the current crate
+
 hir_analysis_only_current_traits_arbitrary = only traits defined in the current crate can be implemented for arbitrary types
 
 hir_analysis_only_current_traits_foreign = this is not defined in the current crate because this is a foreign trait
@@ -347,6 +349,9 @@ hir_analysis_pass_to_variadic_function = can't pass `{$ty}` to variadic function
     .suggestion = cast the value to `{$cast_ty}`
     .help = cast the value to `{$cast_ty}`
 
+hir_analysis_pattern_type_non_const_range = "range patterns must have constant range start and end"
+hir_analysis_pattern_type_wild_pat = "wildcard patterns are not permitted for pattern types"
+    .label = "this type is the same as the inner type without a pattern"
 hir_analysis_placeholder_not_allowed_item_signatures = the placeholder `_` is not allowed within types on item signatures for {$kind}
     .label = not allowed in type signatures
 

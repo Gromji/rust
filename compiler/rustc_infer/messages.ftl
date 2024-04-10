@@ -169,7 +169,7 @@ infer_lifetime_param_suggestion_elided = each elided lifetime in input position 
 
 infer_meant_byte_literal = if you meant to write a byte literal, prefix with `b`
 infer_meant_char_literal = if you meant to write a `char` literal, use single quotes
-infer_meant_str_literal = if you meant to write a `str` literal, use double quotes
+infer_meant_str_literal = if you meant to write a string literal, use double quotes
 infer_mismatched_static_lifetime = incompatible lifetime on type
 infer_more_targeted = {$has_param_name ->
     [true] `{$param_name}`
@@ -270,9 +270,6 @@ infer_ril_introduced_by = requirement introduced by this return type
 infer_ril_introduced_here = `'static` requirement introduced here
 infer_ril_static_introduced_by = "`'static` lifetime requirement introduced by the return type
 
-infer_sbfrit_box_return_expr = if you change the return type to expect trait objects, box the returned expressions
-
-infer_sbfrit_change_return_type = you could change the return type to be a boxed trait object
 infer_source_kind_closure_return =
     try giving this closure an explicit return type
 

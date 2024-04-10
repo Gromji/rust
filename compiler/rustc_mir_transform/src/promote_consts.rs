@@ -434,7 +434,7 @@ impl<'tcx> Validator<'_, 'tcx> {
             Rvalue::ThreadLocalRef(_) => return Err(Unpromotable),
 
             // ptr-to-int casts are not possible in consts and thus not promotable
-            Rvalue::Cast(CastKind::PointerExposeAddress, _, _) => return Err(Unpromotable),
+            Rvalue::Cast(CastKind::PointerExposeProvenance, _, _) => return Err(Unpromotable),
 
             // all other casts including int-to-ptr casts are fine, they just use the integer value
             // at pointer type.
@@ -446,7 +446,7 @@ impl<'tcx> Validator<'_, 'tcx> {
                 NullOp::SizeOf => {}
                 NullOp::AlignOf => {}
                 NullOp::OffsetOf(_) => {}
-                NullOp::UbCheck(_) => {}
+                NullOp::UbChecks => {}
             },
 
             Rvalue::ShallowInitBox(_, _) => return Err(Unpromotable),
@@ -464,7 +464,7 @@ impl<'tcx> Validator<'_, 'tcx> {
                 let op = *op;
                 let lhs_ty = lhs.ty(self.body, self.tcx);
 
-                if let ty::RawPtr(_) | ty::FnPtr(..) = lhs_ty.kind() {
+                if let ty::RawPtr(_, _) | ty::FnPtr(..) = lhs_ty.kind() {
                     // Raw and fn pointer operations are not allowed inside consts and thus not promotable.
                     assert!(matches!(
                         op,
@@ -525,6 +525,7 @@ impl<'tcx> Validator<'_, 'tcx> {
                     | BinOp::Lt
                     | BinOp::Ge
                     | BinOp::Gt
+                    | BinOp::Cmp
                     | BinOp::Offset
                     | BinOp::Add
                     | BinOp::AddUnchecked
@@ -820,11 +821,8 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
             let ty = local_decls[place.local].ty;
             let span = statement.source_info.span;
 
-            let ref_ty = Ty::new_ref(
-                tcx,
-                tcx.lifetimes.re_erased,
-                ty::TypeAndMut { ty, mutbl: borrow_kind.to_mutbl_lossy() },
-            );
+            let ref_ty =
+                Ty::new_ref(tcx, tcx.lifetimes.re_erased, ty, borrow_kind.to_mutbl_lossy());
 
             let mut projection = vec![PlaceElem::Deref];
             projection.extend(place.projection);

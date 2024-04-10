@@ -251,19 +251,13 @@ impl<'tcx> Stable<'tcx> for mir::NullOp<'tcx> {
     type T = stable_mir::mir::NullOp;
     fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
         use rustc_middle::mir::NullOp::*;
-        use rustc_middle::mir::UbKind;
         match self {
             SizeOf => stable_mir::mir::NullOp::SizeOf,
             AlignOf => stable_mir::mir::NullOp::AlignOf,
             OffsetOf(indices) => stable_mir::mir::NullOp::OffsetOf(
                 indices.iter().map(|idx| idx.stable(tables)).collect(),
             ),
-            UbCheck(UbKind::LanguageUb) => {
-                stable_mir::mir::NullOp::UbCheck(stable_mir::mir::UbKind::LanguageUb)
-            }
-            UbCheck(UbKind::LibraryUb) => {
-                stable_mir::mir::NullOp::UbCheck(stable_mir::mir::UbKind::LibraryUb)
-            }
+            UbChecks => stable_mir::mir::NullOp::UbChecks,
         }
     }
 }
@@ -273,8 +267,8 @@ impl<'tcx> Stable<'tcx> for mir::CastKind {
     fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
         use rustc_middle::mir::CastKind::*;
         match self {
-            PointerExposeAddress => stable_mir::mir::CastKind::PointerExposeAddress,
-            PointerFromExposedAddress => stable_mir::mir::CastKind::PointerFromExposedAddress,
+            PointerExposeProvenance => stable_mir::mir::CastKind::PointerExposeAddress,
+            PointerWithExposedProvenance => stable_mir::mir::CastKind::PointerWithExposedProvenance,
             PointerCoercion(c) => stable_mir::mir::CastKind::PointerCoercion(c.stable(tables)),
             DynStar => stable_mir::mir::CastKind::DynStar,
             IntToInt => stable_mir::mir::CastKind::IntToInt,
@@ -499,6 +493,7 @@ impl<'tcx> Stable<'tcx> for mir::BinOp {
             BinOp::Ne => stable_mir::mir::BinOp::Ne,
             BinOp::Ge => stable_mir::mir::BinOp::Ge,
             BinOp::Gt => stable_mir::mir::BinOp::Gt,
+            BinOp::Cmp => stable_mir::mir::BinOp::Cmp,
             BinOp::Offset => stable_mir::mir::BinOp::Offset,
         }
     }

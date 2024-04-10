@@ -212,15 +212,10 @@
 //! [rust-discord]: https://discord.gg/rust-lang
 //! [array]: prim@array
 //! [slice]: prim@slice
-// To run std tests without x.py without ending up with two copies of std, Miri needs to be
-// able to "empty" this crate. See <https://github.com/rust-lang/miri-test-libstd/issues/4>.
-// rustc itself never sets the feature, so this line has no effect there.
-#![cfg(any(not(feature = "miri-test-libstd"), test, doctest))]
-// miri-test-libstd also prefers to make std use the sysroot versions of the dependencies.
-#![cfg_attr(feature = "miri-test-libstd", feature(rustc_private))]
-//
+
 #![cfg_attr(not(feature = "restricted-std"), stable(feature = "rust1", since = "1.0.0"))]
 #![cfg_attr(feature = "restricted-std", unstable(feature = "restricted_std", issue = "none"))]
+#![cfg_attr(not(bootstrap), rustc_preserve_ub_checks)]
 #![doc(
     html_playground_url = "https://play.rust-lang.org/",
     issue_tracker_base_url = "https://github.com/rust-lang/rust/issues/",
@@ -270,9 +265,6 @@
 //
 // Language features:
 // tidy-alphabetical-start
-#![cfg_attr(bootstrap, feature(exhaustive_patterns))]
-#![cfg_attr(bootstrap, feature(platform_intrinsics))]
-#![cfg_attr(not(bootstrap), feature(min_exhaustive_patterns))]
 #![feature(alloc_error_handler)]
 #![feature(allocator_internals)]
 #![feature(allow_internal_unsafe)]
@@ -297,6 +289,7 @@
 #![feature(let_chains)]
 #![feature(link_cfg)]
 #![feature(linkage)]
+#![feature(min_exhaustive_patterns)]
 #![feature(min_specialization)]
 #![feature(must_not_suspend)]
 #![feature(needs_panic_runtime)]
@@ -330,6 +323,7 @@
 #![feature(float_gamma)]
 #![feature(float_minimum_maximum)]
 #![feature(float_next_up_down)]
+#![feature(fmt_internals)]
 #![feature(generic_nonzero)]
 #![feature(hasher_prefixfree_extras)]
 #![feature(hashmap_internals)]
@@ -341,7 +335,7 @@
 #![feature(panic_can_unwind)]
 #![feature(panic_info_message)]
 #![feature(panic_internals)]
-#![feature(pointer_is_aligned)]
+#![feature(pointer_is_aligned_to)]
 #![feature(portable_simd)]
 #![feature(prelude_2024)]
 #![feature(ptr_as_uninit)]
@@ -582,6 +576,9 @@ pub mod net;
 pub mod num;
 pub mod os;
 pub mod panic;
+#[cfg(not(bootstrap))]
+#[unstable(feature = "core_pattern_types", issue = "none")]
+pub mod pat;
 pub mod path;
 pub mod process;
 pub mod sync;

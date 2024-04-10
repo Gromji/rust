@@ -8,8 +8,8 @@ use rustc_hir::definitions::{DefPathData, DisambiguatedDefPathData};
 use rustc_middle::ty::layout::IntegerExt;
 use rustc_middle::ty::print::{Print, PrintError, Printer};
 use rustc_middle::ty::{
-    self, EarlyBinder, FloatTy, Instance, IntTy, Ty, TyCtxt, TypeVisitable, TypeVisitableExt,
-    UintTy,
+    self, EarlyBinder, FloatTy, Instance, IntTy, ReifyReason, Ty, TyCtxt, TypeVisitable,
+    TypeVisitableExt, UintTy,
 };
 use rustc_middle::ty::{GenericArg, GenericArgKind};
 use rustc_span::symbol::kw;
@@ -44,14 +44,12 @@ pub(super) fn mangle<'tcx>(
     let shim_kind = match instance.def {
         ty::InstanceDef::ThreadLocalShim(_) => Some("tls"),
         ty::InstanceDef::VTableShim(_) => Some("vtable"),
-        ty::InstanceDef::ReifyShim(_) => Some("reify"),
+        ty::InstanceDef::ReifyShim(_, None) => Some("reify"),
+        ty::InstanceDef::ReifyShim(_, Some(ReifyReason::FnPtr)) => Some("reify_fnptr"),
+        ty::InstanceDef::ReifyShim(_, Some(ReifyReason::Vtable)) => Some("reify_vtable"),
 
-        ty::InstanceDef::ConstructCoroutineInClosureShim { target_kind, .. }
-        | ty::InstanceDef::CoroutineKindShim { target_kind, .. } => match target_kind {
-            ty::ClosureKind::Fn => unreachable!(),
-            ty::ClosureKind::FnMut => Some("fn_mut"),
-            ty::ClosureKind::FnOnce => Some("fn_once"),
-        },
+        ty::InstanceDef::ConstructCoroutineInClosureShim { .. }
+        | ty::InstanceDef::CoroutineKindShim { .. } => Some("fn_once"),
 
         _ => None,
     };
@@ -365,13 +363,32 @@ impl<'tcx> Printer<'tcx> for SymbolMangler<'tcx> {
                 ty.print(self)?;
             }
 
-            ty::RawPtr(mt) => {
-                self.push(match mt.mutbl {
+            ty::RawPtr(ty, mutbl) => {
+                self.push(match mutbl {
                     hir::Mutability::Not => "P",
                     hir::Mutability::Mut => "O",
                 });
-                mt.ty.print(self)?;
+                ty.print(self)?;
             }
+
+            ty::Pat(ty, pat) => match *pat {
+                ty::PatternKind::Range { start, end, include_end } => {
+                    let consts = [
+                        start.unwrap_or(self.tcx.consts.unit),
+                        end.unwrap_or(self.tcx.consts.unit),
+                        ty::Const::from_bool(self.tcx, include_end).into(),
+                    ];
+                    // HACK: Represent as tuple until we have something better.
+                    // HACK: constants are used in arrays, even if the types don't match.
+                    self.push("T");
+                    ty.print(self)?;
+                    for ct in consts {
+                        Ty::new_array_with_const_len(self.tcx, self.tcx.types.unit, ct)
+                            .print(self)?;
+                    }
+                    self.push("E");
+                }
+            },
 
             ty::Array(ty, len) => {
                 self.push("A");

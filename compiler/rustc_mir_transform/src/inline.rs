@@ -165,7 +165,7 @@ impl<'tcx> Inliner<'tcx> {
         caller_body: &mut Body<'tcx>,
         callsite: &CallSite<'tcx>,
     ) -> Result<std::ops::Range<BasicBlock>, &'static str> {
-        self.check_mir_is_available(caller_body, &callsite.callee)?;
+        self.check_mir_is_available(caller_body, callsite.callee)?;
 
         let callee_attrs = self.tcx.codegen_fn_attrs(callsite.callee.def_id());
         let cross_crate_inlinable = self.tcx.cross_crate_inlinable(callsite.callee.def_id());
@@ -213,6 +213,7 @@ impl<'tcx> Inliner<'tcx> {
             MirPhase::Runtime(RuntimePhase::Optimized),
             self.param_env,
             &callee_body,
+            &caller_body,
         )
         .is_empty()
         {
@@ -297,7 +298,7 @@ impl<'tcx> Inliner<'tcx> {
     fn check_mir_is_available(
         &self,
         caller_body: &Body<'tcx>,
-        callee: &Instance<'tcx>,
+        callee: Instance<'tcx>,
     ) -> Result<(), &'static str> {
         let caller_def_id = caller_body.source.def_id();
         let callee_def_id = callee.def_id();
@@ -323,7 +324,7 @@ impl<'tcx> Inliner<'tcx> {
             // do not need to catch this here, we can wait until the inliner decides to continue
             // inlining a second time.
             InstanceDef::VTableShim(_)
-            | InstanceDef::ReifyShim(_)
+            | InstanceDef::ReifyShim(..)
             | InstanceDef::FnPtrShim(..)
             | InstanceDef::ClosureOnceShim { .. }
             | InstanceDef::ConstructCoroutineInClosureShim { .. }
@@ -353,7 +354,7 @@ impl<'tcx> Inliner<'tcx> {
 
             // If we know for sure that the function we're calling will itself try to
             // call us, then we avoid inlining that function.
-            if self.tcx.mir_callgraph_reachable((*callee, caller_def_id.expect_local())) {
+            if self.tcx.mir_callgraph_reachable((callee, caller_def_id.expect_local())) {
                 return Err("caller might be reachable from callee (query cycle avoidance)");
             }
 
@@ -565,7 +566,8 @@ impl<'tcx> Inliner<'tcx> {
         mut callee_body: Body<'tcx>,
     ) {
         let terminator = caller_body[callsite.block].terminator.take().unwrap();
-        let TerminatorKind::Call { args, destination, unwind, target, .. } = terminator.kind else {
+        let TerminatorKind::Call { func, args, destination, unwind, target, .. } = terminator.kind
+        else {
             bug!("unexpected terminator kind {:?}", terminator.kind);
         };
 
@@ -717,6 +719,24 @@ impl<'tcx> Inliner<'tcx> {
                 Const::Val(..) | Const::Unevaluated(..) => true,
             },
         ));
+        // Now that we incorporated the callee's `required_consts`, we can remove the callee from
+        // `mentioned_items` -- but we have to take their `mentioned_items` in return. This does
+        // some extra work here to save the monomorphization collector work later. It helps a lot,
+        // since monomorphization can avoid a lot of work when the "mentioned items" are similar to
+        // the actually used items. By doing this we can entirely avoid visiting the callee!
+        // We need to reconstruct the `required_item` for the callee so that we can find and
+        // remove it.
+        let callee_item = MentionedItem::Fn(func.ty(caller_body, self.tcx));
+        if let Some(idx) =
+            caller_body.mentioned_items.iter().position(|item| item.node == callee_item)
+        {
+            // We found the callee, so remove it and add its items instead.
+            caller_body.mentioned_items.remove(idx);
+            caller_body.mentioned_items.extend(callee_body.mentioned_items);
+        } else {
+            // If we can't find the callee, there's no point in adding its items.
+            // Probably it already got removed by being inlined elsewhere in the same function.
+        }
     }
 
     fn make_call_args(
@@ -1057,7 +1077,7 @@ fn try_instance_mir<'tcx>(
         let fields = def.all_fields();
         for field in fields {
             let field_ty = field.ty(tcx, args);
-            if field_ty.has_param() && field_ty.has_projections() {
+            if field_ty.has_param() && field_ty.has_aliases() {
                 return Err("cannot build drop shim for polymorphic type");
             }
         }

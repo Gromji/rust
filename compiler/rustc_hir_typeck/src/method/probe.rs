@@ -3,7 +3,6 @@ use super::CandidateSource;
 use super::MethodError;
 use super::NoMatchData;
 
-use crate::errors::MethodCallOnUnknownRawPointee;
 use crate::FnCtxt;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::Applicability;
@@ -386,10 +385,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
                 let infcx = &self.infcx;
                 let (ParamEnvAnd { param_env: _, value: self_ty }, canonical_inference_vars) =
-                    infcx.instantiate_canonical_with_fresh_inference_vars(
-                        span,
-                        &param_env_and_self_ty,
-                    );
+                    infcx.instantiate_canonical(span, &param_env_and_self_ty);
                 debug!(
                     "probe_op: Mode::Path, param_env_and_self_ty={:?} self_ty={:?}",
                     param_env_and_self_ty, self_ty
@@ -433,21 +429,20 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             if is_suggestion.0 {
                 // Ambiguity was encountered during a suggestion. Just keep going.
                 debug!("ProbeContext: encountered ambiguity in suggestion");
-            } else if bad_ty.reached_raw_pointer && !self.tcx.features().arbitrary_self_types {
+            } else if bad_ty.reached_raw_pointer
+                && !self.tcx.features().arbitrary_self_types
+                && !self.tcx.sess.at_least_rust_2018()
+            {
                 // this case used to be allowed by the compiler,
                 // so we do a future-compat lint here for the 2015 edition
                 // (see https://github.com/rust-lang/rust/issues/46906)
-                if self.tcx.sess.at_least_rust_2018() {
-                    self.dcx().emit_err(MethodCallOnUnknownRawPointee { span });
-                } else {
-                    self.tcx.node_span_lint(
-                        lint::builtin::TYVAR_BEHIND_RAW_POINTER,
-                        scope_expr_id,
-                        span,
-                        "type annotations needed",
-                        |_| {},
-                    );
-                }
+                self.tcx.node_span_lint(
+                    lint::builtin::TYVAR_BEHIND_RAW_POINTER,
+                    scope_expr_id,
+                    span,
+                    "type annotations needed",
+                    |_| {},
+                );
             } else {
                 // Ended up encountering a type variable when doing autoderef,
                 // but it may not be a type variable after processing obligations
@@ -458,10 +453,21 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     .unwrap_or_else(|_| span_bug!(span, "instantiating {:?} failed?", ty));
                 let ty = self.resolve_vars_if_possible(ty.value);
                 let guar = match *ty.kind() {
-                    ty::Infer(ty::TyVar(_)) => self
-                        .err_ctxt()
-                        .emit_inference_failure_err(self.body_id, span, ty.into(), E0282, true)
-                        .emit(),
+                    ty::Infer(ty::TyVar(_)) => {
+                        let raw_ptr_call =
+                            bad_ty.reached_raw_pointer && !self.tcx.features().arbitrary_self_types;
+                        let mut err = self.err_ctxt().emit_inference_failure_err(
+                            self.body_id,
+                            span,
+                            ty.into(),
+                            E0282,
+                            !raw_ptr_call,
+                        );
+                        if raw_ptr_call {
+                            err.span_label(span, "cannot call a method on a raw pointer with an unknown pointee type");
+                        }
+                        err.emit()
+                    }
                     ty::Error(guar) => guar,
                     _ => bug!("unexpected bad final type in method autoderef"),
                 };
@@ -531,7 +537,7 @@ fn method_autoderef_steps<'tcx>(
                 from_unsafe_deref: reached_raw_pointer,
                 unsize: false,
             };
-            if let ty::RawPtr(_) = ty.kind() {
+            if let ty::RawPtr(_, _) = ty.kind() {
                 // all the subsequent steps will be from_unsafe_deref
                 reached_raw_pointer = true;
             }
@@ -661,13 +667,13 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                 // of the iterations in the autoderef loop, so there is no problem with it
                 // being discoverable in another one of these iterations.
                 //
-                // Using `instantiate_canonical_with_fresh_inference_vars` on our
+                // Using `instantiate_canonical` on our
                 // `Canonical<QueryResponse<Ty<'tcx>>>` and then *throwing away* the
                 // `CanonicalVarValues` will exactly give us such a generalization - it
                 // will still match the original object type, but it won't pollute our
                 // type variables in any form, so just do that!
                 let (QueryResponse { value: generalized_self_ty, .. }, _ignored_var_values) =
-                    self.fcx.instantiate_canonical_with_fresh_inference_vars(self.span, self_ty);
+                    self.fcx.instantiate_canonical(self.span, self_ty);
 
                 self.assemble_inherent_candidates_from_object(generalized_self_ty);
                 self.assemble_inherent_impl_candidates_for_type(p.def_id());
@@ -699,7 +705,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
             | ty::Str
             | ty::Array(..)
             | ty::Slice(_)
-            | ty::RawPtr(_)
+            | ty::RawPtr(_, _)
             | ty::Ref(..)
             | ty::Never
             | ty::Tuple(..) => self.assemble_inherent_candidates_for_incoherent_ty(raw_self_ty),
@@ -1216,7 +1222,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         // In general, during probing we erase regions.
         let region = tcx.lifetimes.re_erased;
 
-        let autoref_ty = Ty::new_ref(tcx, region, ty::TypeAndMut { ty: self_ty, mutbl });
+        let autoref_ty = Ty::new_ref(tcx, region, self_ty, mutbl);
         self.pick_method(autoref_ty, unstable_candidates).map(|r| {
             r.map(|mut pick| {
                 pick.autoderefs = step.autoderefs;
@@ -1241,12 +1247,11 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
             return None;
         }
 
-        let &ty::RawPtr(ty::TypeAndMut { ty, mutbl: hir::Mutability::Mut }) = self_ty.kind() else {
+        let &ty::RawPtr(ty, hir::Mutability::Mut) = self_ty.kind() else {
             return None;
         };
 
-        let const_self_ty = ty::TypeAndMut { ty, mutbl: hir::Mutability::Not };
-        let const_ptr_ty = Ty::new_ptr(self.tcx, const_self_ty);
+        let const_ptr_ty = Ty::new_imm_ptr(self.tcx, ty);
         self.pick_method(const_ptr_ty, unstable_candidates).map(|r| {
             r.map(|mut pick| {
                 pick.autoderefs = step.autoderefs;

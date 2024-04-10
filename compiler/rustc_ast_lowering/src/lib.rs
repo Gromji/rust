@@ -55,7 +55,9 @@ use rustc_errors::{DiagArgFromDisplay, DiagCtxt, StashKey};
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, LifetimeRes, Namespace, PartialRes, PerNS, Res};
 use rustc_hir::def_id::{LocalDefId, LocalDefIdMap, CRATE_DEF_ID, LOCAL_CRATE};
-use rustc_hir::{ConstArg, GenericArg, ItemLocalMap, ParamName, TraitCandidate};
+use rustc_hir::{
+    ConstArg, GenericArg, ItemLocalMap, MissingLifetimeKind, ParamName, TraitCandidate,
+};
 use rustc_index::{Idx, IndexSlice, IndexVec};
 use rustc_macros::extension;
 use rustc_middle::span_bug;
@@ -155,7 +157,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             attrs: SortedMap::default(),
             children: Vec::default(),
             current_hir_id_owner: hir::CRATE_OWNER_ID,
-            item_local_id_counter: hir::ItemLocalId::new(0),
+            item_local_id_counter: hir::ItemLocalId::ZERO,
             node_id_to_local_id: Default::default(),
             trait_map: Default::default(),
 
@@ -581,7 +583,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         // and the caller to refer to some of the subdefinitions' nodes' `LocalDefId`s.
 
         // Always allocate the first `HirId` for the owner itself.
-        let _old = self.node_id_to_local_id.insert(owner, hir::ItemLocalId::new(0));
+        let _old = self.node_id_to_local_id.insert(owner, hir::ItemLocalId::ZERO);
         debug_assert_eq!(_old, None);
 
         let item = f(self);
@@ -675,7 +677,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                 v.insert(local_id);
                 self.item_local_id_counter.increment_by(1);
 
-                assert_ne!(local_id, hir::ItemLocalId::new(0));
+                assert_ne!(local_id, hir::ItemLocalId::ZERO);
                 if let Some(def_id) = self.opt_local_def_id(ast_node_id) {
                     self.children.push((def_id, hir::MaybeOwner::NonOwner(hir_id)));
                 }
@@ -694,7 +696,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
     fn next_id(&mut self) -> hir::HirId {
         let owner = self.current_hir_id_owner;
         let local_id = self.item_local_id_counter;
-        assert_ne!(local_id, hir::ItemLocalId::new(0));
+        assert_ne!(local_id, hir::ItemLocalId::ZERO);
         self.item_local_id_counter.increment_by(1);
         hir::HirId { owner, local_id }
     }
@@ -797,7 +799,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             LifetimeRes::Param { .. } => {
                 (hir::ParamName::Plain(ident), hir::LifetimeParamKind::Explicit)
             }
-            LifetimeRes::Fresh { param, .. } => {
+            LifetimeRes::Fresh { param, kind, .. } => {
                 // Late resolution delegates to us the creation of the `LocalDefId`.
                 let _def_id = self.create_def(
                     self.current_hir_id_owner.def_id,
@@ -808,7 +810,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                 );
                 debug!(?_def_id);
 
-                (hir::ParamName::Fresh, hir::LifetimeParamKind::Elided)
+                (hir::ParamName::Fresh, hir::LifetimeParamKind::Elided(kind))
             }
             LifetimeRes::Static | LifetimeRes::Error => return None,
             res => panic!(
@@ -1461,7 +1463,10 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     }
                 }
             }
-            TyKind::MacCall(_) => panic!("`TyKind::MacCall` should have been expanded by now"),
+            TyKind::Pat(ty, pat) => hir::TyKind::Pat(self.lower_ty(ty, itctx), self.lower_pat(pat)),
+            TyKind::MacCall(_) => {
+                span_bug!(t.span, "`TyKind::MacCall` should have been expanded by now")
+            }
             TyKind::CVarArgs => {
                 let guar = self.dcx().span_delayed_bug(
                     t.span,
@@ -1605,13 +1610,13 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
 
         for lifetime in captured_lifetimes_to_duplicate {
             let res = self.resolver.get_lifetime_res(lifetime.id).unwrap_or(LifetimeRes::Error);
-            let old_def_id = match res {
-                LifetimeRes::Param { param: old_def_id, binder: _ } => old_def_id,
+            let (old_def_id, missing_kind) = match res {
+                LifetimeRes::Param { param: old_def_id, binder: _ } => (old_def_id, None),
 
-                LifetimeRes::Fresh { param, binder: _ } => {
+                LifetimeRes::Fresh { param, kind, .. } => {
                     debug_assert_eq!(lifetime.ident.name, kw::UnderscoreLifetime);
                     if let Some(old_def_id) = self.orig_opt_local_def_id(param) {
-                        old_def_id
+                        (old_def_id, Some(kind))
                     } else {
                         self.dcx()
                             .span_delayed_bug(lifetime.ident.span, "no def-id for fresh lifetime");
@@ -1651,6 +1656,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     duplicated_lifetime_node_id,
                     duplicated_lifetime_def_id,
                     self.lower_ident(lifetime.ident),
+                    missing_kind,
                 ));
 
                 // Now make an arg that we can use for the generic params of the opaque tykind.
@@ -1668,27 +1674,33 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             let bounds = this
                 .with_remapping(captured_to_synthesized_mapping, |this| lower_item_bounds(this));
 
-            let generic_params = this.arena.alloc_from_iter(
-                synthesized_lifetime_definitions.iter().map(|&(new_node_id, new_def_id, ident)| {
-                    let hir_id = this.lower_node_id(new_node_id);
-                    let (name, kind) = if ident.name == kw::UnderscoreLifetime {
-                        (hir::ParamName::Fresh, hir::LifetimeParamKind::Elided)
-                    } else {
-                        (hir::ParamName::Plain(ident), hir::LifetimeParamKind::Explicit)
-                    };
+            let generic_params =
+                this.arena.alloc_from_iter(synthesized_lifetime_definitions.iter().map(
+                    |&(new_node_id, new_def_id, ident, missing_kind)| {
+                        let hir_id = this.lower_node_id(new_node_id);
+                        let (name, kind) = if ident.name == kw::UnderscoreLifetime {
+                            (
+                                hir::ParamName::Fresh,
+                                hir::LifetimeParamKind::Elided(
+                                    missing_kind.unwrap_or(MissingLifetimeKind::Underscore),
+                                ),
+                            )
+                        } else {
+                            (hir::ParamName::Plain(ident), hir::LifetimeParamKind::Explicit)
+                        };
 
-                    hir::GenericParam {
-                        hir_id,
-                        def_id: new_def_id,
-                        name,
-                        span: ident.span,
-                        pure_wrt_drop: false,
-                        kind: hir::GenericParamKind::Lifetime { kind },
-                        colon_span: None,
-                        source: hir::GenericParamSource::Generics,
-                    }
-                }),
-            );
+                        hir::GenericParam {
+                            hir_id,
+                            def_id: new_def_id,
+                            name,
+                            span: ident.span,
+                            pure_wrt_drop: false,
+                            kind: hir::GenericParamKind::Lifetime { kind },
+                            colon_span: None,
+                            source: hir::GenericParamSource::Generics,
+                        }
+                    },
+                ));
             debug!("lower_async_fn_ret_ty: generic_params={:#?}", generic_params);
 
             let lifetime_mapping = self.arena.alloc_slice(&synthesized_lifetime_args);
@@ -1838,8 +1850,8 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     // the case where we have a mutable pattern to a reference as that would
                     // no longer be an `ImplicitSelf`.
                     TyKind::Ref(_, mt) if mt.ty.kind.is_implicit_self() => match mt.mutbl {
-                        hir::Mutability::Not => hir::ImplicitSelfKind::ImmRef,
-                        hir::Mutability::Mut => hir::ImplicitSelfKind::MutRef,
+                        hir::Mutability::Not => hir::ImplicitSelfKind::RefImm,
+                        hir::Mutability::Mut => hir::ImplicitSelfKind::RefMut,
                     },
                     _ => hir::ImplicitSelfKind::None,
                 }
@@ -2332,7 +2344,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             debug_assert!(!a.is_empty());
             self.attrs.insert(hir_id.local_id, a);
         }
-        let local = hir::Local {
+        let local = hir::LetStmt {
             hir_id,
             init,
             pat,

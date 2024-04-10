@@ -13,7 +13,7 @@ use rustc_middle::mir::interpret::{
     Provenance,
 };
 use rustc_middle::mir::visit::Visitor;
-use rustc_middle::mir::{self, *};
+use rustc_middle::mir::*;
 use rustc_target::abi::Size;
 
 const INDENT: &str = "    ";
@@ -126,7 +126,7 @@ fn dump_matched_mir_node<'tcx, F>(
             Some(promoted) => write!(file, "::{promoted:?}`")?,
         }
         writeln!(file, " {disambiguator} {pass_name}")?;
-        if let Some(ref layout) = body.coroutine_layout() {
+        if let Some(ref layout) = body.coroutine_layout_raw() {
             writeln!(file, "/* coroutine_layout = {layout:#?} */")?;
         }
         writeln!(file)?;
@@ -711,7 +711,7 @@ impl Debug for Statement<'_> {
             AscribeUserType(box (ref place, ref c_ty), ref variance) => {
                 write!(fmt, "AscribeUserType({place:?}, {variance:?}, {c_ty:?})")
             }
-            Coverage(box mir::Coverage { ref kind }) => write!(fmt, "Coverage::{kind:?}"),
+            Coverage(ref kind) => write!(fmt, "Coverage::{kind:?}"),
             Intrinsic(box ref intrinsic) => write!(fmt, "{intrinsic}"),
             ConstEvalCounter => write!(fmt, "ConstEvalCounter"),
             Nop => write!(fmt, "nop"),
@@ -944,7 +944,7 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                     NullOp::SizeOf => write!(fmt, "SizeOf({t})"),
                     NullOp::AlignOf => write!(fmt, "AlignOf({t})"),
                     NullOp::OffsetOf(fields) => write!(fmt, "OffsetOf({t}, {fields:?})"),
-                    NullOp::UbCheck(kind) => write!(fmt, "UbCheck({kind:?})"),
+                    NullOp::UbChecks => write!(fmt, "UbChecks()"),
                 }
             }
             ThreadLocalRef(did) => ty::tls::with(|tcx| {

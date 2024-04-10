@@ -19,7 +19,7 @@ use stable_mir::abi::{FnAbi, Layout, LayoutShape};
 use stable_mir::compiler_interface::Context;
 use stable_mir::mir::alloc::GlobalAlloc;
 use stable_mir::mir::mono::{InstanceDef, StaticDef};
-use stable_mir::mir::Body;
+use stable_mir::mir::{BinOp, Body, Place};
 use stable_mir::target::{MachineInfo, MachineSize};
 use stable_mir::ty::{
     AdtDef, AdtKind, Allocation, ClosureDef, ClosureKind, Const, FieldDef, FnDef, ForeignDef,
@@ -420,10 +420,13 @@ impl<'tcx> Context for TablesWrapper<'tcx> {
         let tcx = tables.tcx;
         let args = args.internal(&mut *tables, tcx);
         let def_ty = tables.tcx.type_of(item.internal(&mut *tables, tcx));
-        def_ty.instantiate(tables.tcx, args).stable(&mut *tables)
+        tables
+            .tcx
+            .instantiate_and_normalize_erasing_regions(args, ty::ParamEnv::reveal_all(), def_ty)
+            .stable(&mut *tables)
     }
 
-    fn const_literal(&self, cnst: &stable_mir::ty::Const) -> String {
+    fn const_pretty(&self, cnst: &stable_mir::ty::Const) -> String {
         let mut tables = self.0.borrow_mut();
         let tcx = tables.tcx;
         cnst.internal(&mut *tables, tcx).to_string()
@@ -432,6 +435,11 @@ impl<'tcx> Context for TablesWrapper<'tcx> {
     fn span_of_an_item(&self, def_id: stable_mir::DefId) -> Span {
         let mut tables = self.0.borrow_mut();
         tables.tcx.def_span(tables[def_id]).stable(&mut *tables)
+    }
+
+    fn ty_pretty(&self, ty: stable_mir::ty::Ty) -> String {
+        let tables = self.0.borrow_mut();
+        tables.types[ty].to_string()
     }
 
     fn ty_kind(&self, ty: stable_mir::ty::Ty) -> TyKind {
@@ -653,6 +661,21 @@ impl<'tcx> Context for TablesWrapper<'tcx> {
         let mut tables = self.0.borrow_mut();
         let tcx = tables.tcx;
         id.internal(&mut *tables, tcx).0.stable(&mut *tables)
+    }
+
+    fn place_pretty(&self, place: &Place) -> String {
+        let mut tables = self.0.borrow_mut();
+        let tcx = tables.tcx;
+        format!("{:?}", place.internal(&mut *tables, tcx))
+    }
+
+    fn binop_ty(&self, bin_op: BinOp, rhs: Ty, lhs: Ty) -> Ty {
+        let mut tables = self.0.borrow_mut();
+        let tcx = tables.tcx;
+        let rhs_internal = rhs.internal(&mut *tables, tcx);
+        let lhs_internal = lhs.internal(&mut *tables, tcx);
+        let ty = bin_op.internal(&mut *tables, tcx).ty(tcx, rhs_internal, lhs_internal);
+        ty.stable(&mut *tables)
     }
 }
 

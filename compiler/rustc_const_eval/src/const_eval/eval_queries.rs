@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering::Relaxed;
+
 use either::{Left, Right};
 
 use rustc_hir::def::DefKind;
@@ -22,6 +24,7 @@ use crate::interpret::{
     InternKind, InterpCx, InterpError, InterpResult, MPlaceTy, MemoryKind, OpTy, RefTracking,
     StackPopCleanup,
 };
+use crate::CTRL_C_RECEIVED;
 
 // Returns a pointer to where the result lives
 #[instrument(level = "trace", skip(ecx, body))]
@@ -79,7 +82,11 @@ fn eval_body_using_ecx<'mir, 'tcx, R: InterpretationResult<'tcx>>(
     ecx.storage_live_for_always_live_locals()?;
 
     // The main interpreter loop.
-    while ecx.step()? {}
+    while ecx.step()? {
+        if CTRL_C_RECEIVED.load(Relaxed) {
+            throw_exhaust!(Interrupted);
+        }
+    }
 
     // Intern the result
     intern_const_alloc_recursive(ecx, intern_kind, &ret)?;
@@ -402,7 +409,7 @@ fn const_validate_mplace<'mir, 'tcx>(
             }
         };
         ecx.const_validate_operand(&mplace.into(), path, &mut ref_tracking, mode)
-            // Instead of just reporting the `InterpError` via the usual machinery, we give a more targetted
+            // Instead of just reporting the `InterpError` via the usual machinery, we give a more targeted
             // error about the validation failure.
             .map_err(|error| report_validation_error(&ecx, error, alloc_id))?;
         inner = true;

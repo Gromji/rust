@@ -502,6 +502,10 @@ pub fn noop_visit_ty<T: MutVisitor>(ty: &mut P<Ty>, vis: &mut T) {
         }
         TyKind::Tup(tys) => visit_thin_vec(tys, |ty| vis.visit_ty(ty)),
         TyKind::Paren(ty) => vis.visit_ty(ty),
+        TyKind::Pat(ty, pat) => {
+            vis.visit_ty(ty);
+            vis.visit_pat(pat);
+        }
         TyKind::Path(qself, path) => {
             vis.visit_qself(qself);
             vis.visit_path(path);
@@ -1295,6 +1299,7 @@ pub fn noop_visit_pat<T: MutVisitor>(pat: &mut P<Pat>, vis: &mut T) {
             fields.flat_map_in_place(|field| vis.flat_map_pat_field(field));
         }
         PatKind::Box(inner) => vis.visit_pat(inner),
+        PatKind::Deref(inner) => vis.visit_pat(inner),
         PatKind::Ref(inner, _mutbl) => vis.visit_pat(inner),
         PatKind::Range(e1, e2, Spanned { span: _, node: _ }) => {
             visit_opt(e1, |e| vis.visit_expr(e));
@@ -1424,7 +1429,7 @@ pub fn noop_visit_expr<T: MutVisitor>(
             visit_opt(label, |label| vis.visit_label(label));
             vis.visit_span(span);
         }
-        ExprKind::Match(expr, arms) => {
+        ExprKind::Match(expr, arms, _kind) => {
             vis.visit_expr(expr);
             arms.flat_map_in_place(|arm| vis.flat_map_arm(arm));
         }

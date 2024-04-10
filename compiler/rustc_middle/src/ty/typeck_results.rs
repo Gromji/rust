@@ -3,8 +3,8 @@ use crate::{
     infer::canonical::Canonical,
     traits::ObligationCause,
     ty::{
-        self, tls, BindingMode, BoundVar, CanonicalPolyFnSig, ClosureSizeProfileData,
-        GenericArgKind, GenericArgs, GenericArgsRef, Ty, UserArgs,
+        self, tls, BoundVar, CanonicalPolyFnSig, ClosureSizeProfileData, GenericArgKind,
+        GenericArgs, GenericArgsRef, Ty, UserArgs,
     },
 };
 use rustc_data_structures::{
@@ -12,14 +12,14 @@ use rustc_data_structures::{
     unord::{ExtendUnord, UnordItems, UnordSet},
 };
 use rustc_errors::ErrorGuaranteed;
-use rustc_hir as hir;
 use rustc_hir::{
+    self as hir,
     def::{DefKind, Res},
     def_id::{DefId, LocalDefId, LocalDefIdMap},
     hir_id::OwnerId,
-    HirId, ItemLocalId, ItemLocalMap, ItemLocalSet,
+    BindingAnnotation, ByRef, HirId, ItemLocalId, ItemLocalMap, ItemLocalSet, Mutability,
 };
-use rustc_index::{Idx, IndexVec};
+use rustc_index::IndexVec;
 use rustc_macros::HashStable;
 use rustc_middle::mir::FakeReadCause;
 use rustc_session::Session;
@@ -78,8 +78,8 @@ pub struct TypeckResults<'tcx> {
 
     adjustments: ItemLocalMap<Vec<ty::adjustment::Adjustment<'tcx>>>,
 
-    /// Stores the actual binding mode for all instances of hir::BindingAnnotation.
-    pat_binding_modes: ItemLocalMap<BindingMode>,
+    /// Stores the actual binding mode for all instances of [`BindingAnnotation`].
+    pat_binding_modes: ItemLocalMap<BindingAnnotation>,
 
     /// Stores the types which were implicitly dereferenced in pattern binding modes
     /// for later usage in THIR lowering. For example,
@@ -95,6 +95,10 @@ pub struct TypeckResults<'tcx> {
     /// See:
     /// <https://github.com/rust-lang/rfcs/blob/master/text/2005-match-ergonomics.md#definitions>
     pat_adjustments: ItemLocalMap<Vec<Ty<'tcx>>>,
+
+    /// Set of reference patterns that match against a match-ergonomics inserted reference
+    /// (as opposed to against a reference in the scrutinee type).
+    skipped_ref_pats: ItemLocalSet,
 
     /// Records the reasons that we picked the kind of each closure;
     /// not all closures are present in the map.
@@ -228,6 +232,7 @@ impl<'tcx> TypeckResults<'tcx> {
             adjustments: Default::default(),
             pat_binding_modes: Default::default(),
             pat_adjustments: Default::default(),
+            skipped_ref_pats: Default::default(),
             closure_kind_origins: Default::default(),
             liberated_fn_sigs: Default::default(),
             fru_field_types: Default::default(),
@@ -408,17 +413,22 @@ impl<'tcx> TypeckResults<'tcx> {
         matches!(self.type_dependent_defs().get(expr.hir_id), Some(Ok((DefKind::AssocFn, _))))
     }
 
-    pub fn extract_binding_mode(&self, s: &Session, id: HirId, sp: Span) -> Option<BindingMode> {
+    pub fn extract_binding_mode(
+        &self,
+        s: &Session,
+        id: HirId,
+        sp: Span,
+    ) -> Option<BindingAnnotation> {
         self.pat_binding_modes().get(id).copied().or_else(|| {
             s.dcx().span_bug(sp, "missing binding mode");
         })
     }
 
-    pub fn pat_binding_modes(&self) -> LocalTableInContext<'_, BindingMode> {
+    pub fn pat_binding_modes(&self) -> LocalTableInContext<'_, BindingAnnotation> {
         LocalTableInContext { hir_owner: self.hir_owner, data: &self.pat_binding_modes }
     }
 
-    pub fn pat_binding_modes_mut(&mut self) -> LocalTableInContextMut<'_, BindingMode> {
+    pub fn pat_binding_modes_mut(&mut self) -> LocalTableInContextMut<'_, BindingAnnotation> {
         LocalTableInContextMut { hir_owner: self.hir_owner, data: &mut self.pat_binding_modes }
     }
 
@@ -428,6 +438,39 @@ impl<'tcx> TypeckResults<'tcx> {
 
     pub fn pat_adjustments_mut(&mut self) -> LocalTableInContextMut<'_, Vec<Ty<'tcx>>> {
         LocalTableInContextMut { hir_owner: self.hir_owner, data: &mut self.pat_adjustments }
+    }
+
+    pub fn skipped_ref_pats(&self) -> LocalSetInContext<'_> {
+        LocalSetInContext { hir_owner: self.hir_owner, data: &self.skipped_ref_pats }
+    }
+
+    pub fn skipped_ref_pats_mut(&mut self) -> LocalSetInContextMut<'_> {
+        LocalSetInContextMut { hir_owner: self.hir_owner, data: &mut self.skipped_ref_pats }
+    }
+
+    /// Does the pattern recursively contain a `ref mut` binding in it?
+    ///
+    /// This is used to determined whether a `deref` pattern should emit a `Deref`
+    /// or `DerefMut` call for its pattern scrutinee.
+    ///
+    /// This is computed from the typeck results since we want to make
+    /// sure to apply any match-ergonomics adjustments, which we cannot
+    /// determine from the HIR alone.
+    pub fn pat_has_ref_mut_binding(&self, pat: &'tcx hir::Pat<'tcx>) -> bool {
+        let mut has_ref_mut = false;
+        pat.walk(|pat| {
+            if let hir::PatKind::Binding(_, id, _, _) = pat.kind
+                && let Some(BindingAnnotation(ByRef::Yes(Mutability::Mut), _)) =
+                    self.pat_binding_modes().get(id)
+            {
+                has_ref_mut = true;
+                // No need to continue recursing
+                false
+            } else {
+                true
+            }
+        });
+        has_ref_mut
     }
 
     /// For a given closure, returns the iterator of `ty::CapturedPlace`s that are captured
@@ -568,6 +611,11 @@ impl<'a, V> LocalTableInContextMut<'a, V> {
         self.data.get_mut(&id.local_id)
     }
 
+    pub fn get(&mut self, id: hir::HirId) -> Option<&V> {
+        validate_hir_id_for_typeck_results(self.hir_owner, id);
+        self.data.get(&id.local_id)
+    }
+
     pub fn entry(&mut self, id: hir::HirId) -> Entry<'_, hir::ItemLocalId, V> {
         validate_hir_id_for_typeck_results(self.hir_owner, id);
         self.data.entry(id.local_id)
@@ -591,6 +639,49 @@ impl<'a, V> LocalTableInContextMut<'a, V> {
             validate_hir_id_for_typeck_results(self.hir_owner, id);
             (id.local_id, value)
         }))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LocalSetInContext<'a> {
+    hir_owner: OwnerId,
+    data: &'a ItemLocalSet,
+}
+
+impl<'a> LocalSetInContext<'a> {
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    pub fn contains(&self, id: hir::HirId) -> bool {
+        validate_hir_id_for_typeck_results(self.hir_owner, id);
+        self.data.contains(&id.local_id)
+    }
+}
+
+#[derive(Debug)]
+pub struct LocalSetInContextMut<'a> {
+    hir_owner: OwnerId,
+    data: &'a mut ItemLocalSet,
+}
+
+impl<'a> LocalSetInContextMut<'a> {
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    pub fn contains(&self, id: hir::HirId) -> bool {
+        validate_hir_id_for_typeck_results(self.hir_owner, id);
+        self.data.contains(&id.local_id)
+    }
+    pub fn insert(&mut self, id: hir::HirId) -> bool {
+        validate_hir_id_for_typeck_results(self.hir_owner, id);
+        self.data.insert(id.local_id)
+    }
+
+    pub fn remove(&mut self, id: hir::HirId) -> bool {
+        validate_hir_id_for_typeck_results(self.hir_owner, id);
+        self.data.remove(&id.local_id)
     }
 }
 
@@ -645,7 +736,7 @@ impl<'tcx> IsIdentity for CanonicalUserType<'tcx> {
                     return false;
                 }
 
-                iter::zip(user_args.args, BoundVar::new(0)..).all(|(kind, cvar)| {
+                iter::zip(user_args.args, BoundVar::ZERO..).all(|(kind, cvar)| {
                     match kind.unpack() {
                         GenericArgKind::Type(ty) => match ty.kind() {
                             ty::Bound(debruijn, b) => {

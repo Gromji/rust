@@ -264,7 +264,7 @@ impl<'v> hir_visit::Visitor<'v> for StatCollector<'v> {
         hir_visit::walk_foreign_item(self, i)
     }
 
-    fn visit_local(&mut self, l: &'v hir::Local<'v>) {
+    fn visit_local(&mut self, l: &'v hir::LetStmt<'v>) {
         self.record("Local", Id::Node(l.hir_id), l);
         hir_visit::walk_local(self, l)
     }
@@ -300,6 +300,7 @@ impl<'v> hir_visit::Visitor<'v> for StatCollector<'v> {
                 Path,
                 Tuple,
                 Box,
+                Deref,
                 Ref,
                 Lit,
                 Range,
@@ -351,6 +352,7 @@ impl<'v> hir_visit::Visitor<'v> for StatCollector<'v> {
                 TraitObject,
                 Typeof,
                 Infer,
+                Pat,
                 Err
             ]
         );
@@ -566,6 +568,7 @@ impl<'v> ast_visit::Visitor<'v> for StatCollector<'v> {
                 Path,
                 Tuple,
                 Box,
+                Deref,
                 Ref,
                 Lit,
                 Range,
@@ -609,6 +612,7 @@ impl<'v> ast_visit::Visitor<'v> for StatCollector<'v> {
                 AnonStruct,
                 AnonUnion,
                 Path,
+                Pat,
                 TraitObject,
                 ImplTrait,
                 Paren,

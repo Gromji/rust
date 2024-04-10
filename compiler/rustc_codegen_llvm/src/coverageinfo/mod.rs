@@ -14,17 +14,15 @@ use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
 use rustc_llvm::RustString;
 use rustc_middle::bug;
 use rustc_middle::mir::coverage::CoverageKind;
-use rustc_middle::mir::Coverage;
 use rustc_middle::ty::layout::HasTyCtxt;
 use rustc_middle::ty::Instance;
+use rustc_target::abi::Align;
 
 use std::cell::RefCell;
 
 pub(crate) mod ffi;
 pub(crate) mod map_data;
 pub mod mapgen;
-
-const VAR_ALIGN_BYTES: usize = 8;
 
 /// A context object for maintaining all state needed by the coverageinfo module.
 pub struct CrateCoverageContext<'ll, 'tcx> {
@@ -75,7 +73,7 @@ impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
 
 impl<'tcx> CoverageInfoBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
     #[instrument(level = "debug", skip(self))]
-    fn add_coverage(&mut self, instance: Instance<'tcx>, coverage: &Coverage) {
+    fn add_coverage(&mut self, instance: Instance<'tcx>, kind: &CoverageKind) {
         // Our caller should have already taken care of inlining subtleties,
         // so we can assume that counter/expression IDs in this coverage
         // statement are meaningful for the given instance.
@@ -84,14 +82,6 @@ impl<'tcx> CoverageInfoBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
         // instance, or it was inlined *from* this instance.)
 
         let bx = self;
-
-        match coverage.kind {
-            // Marker statements have no effect during codegen,
-            // so return early and don't create `func_coverage`.
-            CoverageKind::SpanMarker | CoverageKind::BlockMarker { .. } => return,
-            // Match exhaustively to ensure that newly-added kinds are classified correctly.
-            CoverageKind::CounterIncrement { .. } | CoverageKind::ExpressionUsed { .. } => {}
-        }
 
         let Some(function_coverage_info) =
             bx.tcx.instance_mir(instance.def).function_coverage_info.as_deref()
@@ -106,10 +96,9 @@ impl<'tcx> CoverageInfoBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
             .entry(instance)
             .or_insert_with(|| FunctionCoverageCollector::new(instance, function_coverage_info));
 
-        let Coverage { kind } = coverage;
         match *kind {
             CoverageKind::SpanMarker | CoverageKind::BlockMarker { .. } => unreachable!(
-                "unexpected marker statement {kind:?} should have caused an early return"
+                "marker statement {kind:?} should have been removed by CleanupPostBorrowck"
             ),
             CoverageKind::CounterIncrement { id } => {
                 func_coverage.mark_counter_id_seen(id);
@@ -235,7 +224,8 @@ pub(crate) fn save_cov_data_to_mod<'ll, 'tcx>(
     llvm::set_global_constant(llglobal, true);
     llvm::set_linkage(llglobal, llvm::Linkage::PrivateLinkage);
     llvm::set_section(llglobal, &covmap_section_name);
-    llvm::set_alignment(llglobal, VAR_ALIGN_BYTES);
+    // LLVM's coverage mapping format specifies 8-byte alignment for items in this section.
+    llvm::set_alignment(llglobal, Align::EIGHT);
     cx.add_used_global(llglobal);
 }
 
@@ -265,7 +255,8 @@ pub(crate) fn save_func_record_to_mod<'ll, 'tcx>(
     llvm::set_linkage(llglobal, llvm::Linkage::LinkOnceODRLinkage);
     llvm::set_visibility(llglobal, llvm::Visibility::Hidden);
     llvm::set_section(llglobal, covfun_section_name);
-    llvm::set_alignment(llglobal, VAR_ALIGN_BYTES);
+    // LLVM's coverage mapping format specifies 8-byte alignment for items in this section.
+    llvm::set_alignment(llglobal, Align::EIGHT);
     llvm::set_comdat(cx.llmod, llglobal, &func_record_var_name);
     cx.add_used_global(llglobal);
 }

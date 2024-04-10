@@ -37,7 +37,7 @@ use crate::time::SystemTime;
 ///
 /// # Examples
 ///
-/// Creates a new file and write bytes to it (you can also use [`write()`]):
+/// Creates a new file and write bytes to it (you can also use [`write`]):
 ///
 /// ```no_run
 /// use std::fs::File;
@@ -97,7 +97,7 @@ use crate::time::SystemTime;
 /// have been opened for asynchronous I/O (e.g. by using `FILE_FLAG_OVERLAPPED`).
 ///
 /// [`BufReader`]: io::BufReader
-/// [`BufWriter`]: io::BufReader
+/// [`BufWriter`]: io::BufWriter
 /// [`sync_all`]: File::sync_all
 /// [`write`]: File::write
 /// [`read`]: File::read
@@ -385,7 +385,7 @@ impl File {
     /// See the [`OpenOptions::open`] function for more details.
     ///
     /// See also [`std::fs::write()`][self::write] for a simple function to
-    /// create a file with a given data.
+    /// create a file with some given data.
     ///
     /// # Examples
     ///
@@ -1036,7 +1036,7 @@ impl OpenOptions {
     /// [`OpenOptions::append`] access must be used.
     ///
     /// See also [`std::fs::write()`][self::write] for a simple function to
-    /// create a file with a given data.
+    /// create a file with some given data.
     ///
     /// # Examples
     ///
@@ -2018,7 +2018,7 @@ pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> 
 /// the length of the `to` file as reported by `metadata`.
 ///
 /// If you want to copy the contents of one file to another and you’re
-/// working with [`File`]s, see the [`io::copy()`] function.
+/// working with [`File`]s, see the [`io::copy`](io::copy()) function.
 ///
 /// # Platform-specific behavior
 ///

@@ -11,7 +11,7 @@ use crate::ty::{
 };
 use crate::ty::{GenericArg, GenericArgs, GenericArgsRef};
 use crate::ty::{List, ParamEnv};
-use hir::def::DefKind;
+use hir::def::{CtorKind, DefKind};
 use rustc_data_structures::captures::Captures;
 use rustc_errors::{DiagArgValue, ErrorGuaranteed, IntoDiagArg, MultiSpan};
 use rustc_hir as hir;
@@ -483,7 +483,7 @@ impl<'tcx> CoroutineClosureSignature<'tcx> {
         self.to_coroutine(
             tcx,
             parent_args,
-            Ty::from_closure_kind(tcx, goal_kind),
+            Ty::from_coroutine_closure_kind(tcx, goal_kind),
             coroutine_def_id,
             tupled_upvars_ty,
         )
@@ -694,7 +694,8 @@ impl<'tcx> CoroutineArgs<'tcx> {
     #[inline]
     pub fn variant_range(&self, def_id: DefId, tcx: TyCtxt<'tcx>) -> Range<VariantIdx> {
         // FIXME requires optimized MIR
-        FIRST_VARIANT..tcx.coroutine_layout(def_id).unwrap().variant_fields.next_index()
+        FIRST_VARIANT
+            ..tcx.coroutine_layout(def_id, tcx.types.unit).unwrap().variant_fields.next_index()
     }
 
     /// The discriminant for the given variant. Panics if the `variant_index` is
@@ -754,7 +755,7 @@ impl<'tcx> CoroutineArgs<'tcx> {
         def_id: DefId,
         tcx: TyCtxt<'tcx>,
     ) -> impl Iterator<Item: Iterator<Item = Ty<'tcx>> + Captures<'tcx>> {
-        let layout = tcx.coroutine_layout(def_id).unwrap();
+        let layout = tcx.coroutine_layout(def_id, self.kind_ty()).unwrap();
         layout.variant_fields.iter().map(move |variant| {
             variant.iter().map(move |field| {
                 ty::EarlyBinder::bind(layout.field_tys[*field].ty).instantiate(tcx, self.args)
@@ -867,7 +868,7 @@ impl<'tcx> InlineConstArgs<'tcx> {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, TyEncodable, TyDecodable)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, TyEncodable, TyDecodable)]
 #[derive(HashStable)]
 pub enum BoundVariableKind {
     Ty(BoundTyKind),
@@ -907,7 +908,7 @@ impl BoundVariableKind {
 /// e.g., `liberate_late_bound_regions`).
 ///
 /// `Decodable` and `Encodable` are implemented for `Binder<T>` using the `impl_binder_encode_decode!` macro.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 #[derive(HashStable, Lift)]
 pub struct Binder<'tcx, T> {
     value: T,
@@ -1108,7 +1109,7 @@ where
 /// * For a projection, this would be `<Ty as Trait<...>>::N<...>`.
 /// * For an inherent projection, this would be `Ty::N<...>`.
 /// * For an opaque type, there is no explicit syntax.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, TyEncodable, TyDecodable)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable)]
 #[derive(HashStable, TypeFoldable, TypeVisitable, Lift)]
 pub struct AliasTy<'tcx> {
     /// The parameters of the associated or opaque item.
@@ -1277,7 +1278,7 @@ pub struct GenSig<'tcx> {
 /// - `inputs`: is the list of arguments and their modes.
 /// - `output`: is the return type.
 /// - `c_variadic`: indicates whether this is a C-variadic function.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, TyEncodable, TyDecodable)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable)]
 #[derive(HashStable, TypeFoldable, TypeVisitable, Lift)]
 pub struct FnSig<'tcx> {
     pub inputs_and_output: &'tcx List<Ty<'tcx>>,
@@ -1402,14 +1403,14 @@ impl ParamConst {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TyEncodable, TyDecodable)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, TyEncodable, TyDecodable)]
 #[derive(HashStable)]
 pub struct BoundTy {
     pub var: BoundVar,
     pub kind: BoundTyKind,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, TyEncodable, TyDecodable)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, TyEncodable, TyDecodable)]
 #[derive(HashStable)]
 pub enum BoundTyKind {
     Anon,
@@ -1522,6 +1523,11 @@ impl<'tcx> Ty<'tcx> {
     }
 
     #[inline]
+    pub fn new_pat(tcx: TyCtxt<'tcx>, base: Ty<'tcx>, pat: ty::Pattern<'tcx>) -> Ty<'tcx> {
+        Ty::new(tcx, Pat(base, pat))
+    }
+
+    #[inline]
     pub fn new_opaque(tcx: TyCtxt<'tcx>, def_id: DefId, args: GenericArgsRef<'tcx>) -> Ty<'tcx> {
         Ty::new_alias(tcx, ty::Opaque, AliasTy::new(tcx, def_id, args))
     }
@@ -1587,37 +1593,43 @@ impl<'tcx> Ty<'tcx> {
     }
 
     #[inline]
-    pub fn new_ref(tcx: TyCtxt<'tcx>, r: Region<'tcx>, tm: TypeAndMut<'tcx>) -> Ty<'tcx> {
-        Ty::new(tcx, Ref(r, tm.ty, tm.mutbl))
+    pub fn new_ref(
+        tcx: TyCtxt<'tcx>,
+        r: Region<'tcx>,
+        ty: Ty<'tcx>,
+        mutbl: ty::Mutability,
+    ) -> Ty<'tcx> {
+        Ty::new(tcx, Ref(r, ty, mutbl))
     }
 
     #[inline]
     pub fn new_mut_ref(tcx: TyCtxt<'tcx>, r: Region<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
-        Ty::new_ref(tcx, r, TypeAndMut { ty, mutbl: hir::Mutability::Mut })
+        Ty::new_ref(tcx, r, ty, hir::Mutability::Mut)
     }
 
     #[inline]
     pub fn new_imm_ref(tcx: TyCtxt<'tcx>, r: Region<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
-        Ty::new_ref(tcx, r, TypeAndMut { ty, mutbl: hir::Mutability::Not })
+        Ty::new_ref(tcx, r, ty, hir::Mutability::Not)
     }
 
     #[inline]
-    pub fn new_ptr(tcx: TyCtxt<'tcx>, tm: TypeAndMut<'tcx>) -> Ty<'tcx> {
-        Ty::new(tcx, RawPtr(tm))
+    pub fn new_ptr(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, mutbl: ty::Mutability) -> Ty<'tcx> {
+        Ty::new(tcx, ty::RawPtr(ty, mutbl))
     }
 
     #[inline]
     pub fn new_mut_ptr(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
-        Ty::new_ptr(tcx, TypeAndMut { ty, mutbl: hir::Mutability::Mut })
+        Ty::new_ptr(tcx, ty, hir::Mutability::Mut)
     }
 
     #[inline]
     pub fn new_imm_ptr(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
-        Ty::new_ptr(tcx, TypeAndMut { ty, mutbl: hir::Mutability::Not })
+        Ty::new_ptr(tcx, ty, hir::Mutability::Not)
     }
 
     #[inline]
     pub fn new_adt(tcx: TyCtxt<'tcx>, def: AdtDef<'tcx>, args: GenericArgsRef<'tcx>) -> Ty<'tcx> {
+        tcx.debug_assert_args_compatible(def.did(), args);
         Ty::new(tcx, Adt(def, args))
     }
 
@@ -1664,6 +1676,10 @@ impl<'tcx> Ty<'tcx> {
         def_id: DefId,
         args: impl IntoIterator<Item: Into<GenericArg<'tcx>>>,
     ) -> Ty<'tcx> {
+        debug_assert_matches!(
+            tcx.def_kind(def_id),
+            DefKind::AssocFn | DefKind::Fn | DefKind::Ctor(_, CtorKind::Fn)
+        );
         let args = tcx.check_and_mk_args(def_id, args);
         Ty::new(tcx, FnDef(def_id, args))
     }
@@ -1698,11 +1714,7 @@ impl<'tcx> Ty<'tcx> {
         def_id: DefId,
         closure_args: GenericArgsRef<'tcx>,
     ) -> Ty<'tcx> {
-        debug_assert_eq!(
-            closure_args.len(),
-            tcx.generics_of(tcx.typeck_root_def_id(def_id)).count() + 3,
-            "closure constructed with incorrect generic parameters"
-        );
+        tcx.debug_assert_args_compatible(def_id, closure_args);
         Ty::new(tcx, Closure(def_id, closure_args))
     }
 
@@ -1712,11 +1724,7 @@ impl<'tcx> Ty<'tcx> {
         def_id: DefId,
         closure_args: GenericArgsRef<'tcx>,
     ) -> Ty<'tcx> {
-        debug_assert_eq!(
-            closure_args.len(),
-            tcx.generics_of(tcx.typeck_root_def_id(def_id)).count() + 5,
-            "closure constructed with incorrect generic parameters"
-        );
+        tcx.debug_assert_args_compatible(def_id, closure_args);
         Ty::new(tcx, CoroutineClosure(def_id, closure_args))
     }
 
@@ -1726,11 +1734,7 @@ impl<'tcx> Ty<'tcx> {
         def_id: DefId,
         coroutine_args: GenericArgsRef<'tcx>,
     ) -> Ty<'tcx> {
-        debug_assert_eq!(
-            coroutine_args.len(),
-            tcx.generics_of(tcx.typeck_root_def_id(def_id)).count() + 6,
-            "coroutine constructed with incorrect number of generic parameters"
-        );
+        tcx.debug_assert_args_compatible(def_id, coroutine_args);
         Ty::new(tcx, Coroutine(def_id, coroutine_args))
     }
 
@@ -1910,7 +1914,7 @@ impl<'tcx> Ty<'tcx> {
     pub fn is_array_slice(self) -> bool {
         match self.kind() {
             Slice(_) => true,
-            RawPtr(TypeAndMut { ty, .. }) | Ref(_, ty, _) => matches!(ty.kind(), Slice(_)),
+            ty::RawPtr(ty, _) | Ref(_, ty, _) => matches!(ty.kind(), Slice(_)),
             _ => false,
         }
     }
@@ -1941,7 +1945,7 @@ impl<'tcx> Ty<'tcx> {
             Adt(def, args) => {
                 assert!(def.repr().simd(), "`simd_size_and_type` called on non-SIMD type");
                 let variant = def.non_enum_variant();
-                let f0_ty = variant.fields[FieldIdx::from_u32(0)].ty(tcx, args);
+                let f0_ty = variant.fields[FieldIdx::ZERO].ty(tcx, args);
 
                 match f0_ty.kind() {
                     // If the first field is an array, we assume it is the only field and its
@@ -1964,11 +1968,7 @@ impl<'tcx> Ty<'tcx> {
 
     #[inline]
     pub fn is_mutable_ptr(self) -> bool {
-        matches!(
-            self.kind(),
-            RawPtr(TypeAndMut { mutbl: hir::Mutability::Mut, .. })
-                | Ref(_, _, hir::Mutability::Mut)
-        )
+        matches!(self.kind(), RawPtr(_, hir::Mutability::Mut) | Ref(_, _, hir::Mutability::Mut))
     }
 
     /// Get the mutability of the reference or `None` when not a reference
@@ -1982,7 +1982,7 @@ impl<'tcx> Ty<'tcx> {
 
     #[inline]
     pub fn is_unsafe_ptr(self) -> bool {
-        matches!(self.kind(), RawPtr(_))
+        matches!(self.kind(), RawPtr(_, _))
     }
 
     /// Tests if this is any kind of primitive pointer type (reference, raw pointer, fn pointer).
@@ -2038,7 +2038,7 @@ impl<'tcx> Ty<'tcx> {
                 | Uint(_)
                 | FnDef(..)
                 | FnPtr(_)
-                | RawPtr(_)
+                | RawPtr(_, _)
                 | Infer(IntVar(_) | FloatVar(_))
         )
     }
@@ -2174,7 +2174,7 @@ impl<'tcx> Ty<'tcx> {
                 Some(TypeAndMut { ty: self.boxed_ty(), mutbl: hir::Mutability::Not })
             }
             Ref(_, ty, mutbl) => Some(TypeAndMut { ty: *ty, mutbl: *mutbl }),
-            RawPtr(mt) if explicit => Some(*mt),
+            RawPtr(ty, mutbl) if explicit => Some(TypeAndMut { ty: *ty, mutbl: *mutbl }),
             _ => None,
         }
     }
@@ -2231,7 +2231,7 @@ impl<'tcx> Ty<'tcx> {
     pub fn tuple_fields(self) -> &'tcx List<Ty<'tcx>> {
         match self.kind() {
             Tuple(args) => args,
-            _ => bug!("tuple_fields called on non-tuple"),
+            _ => bug!("tuple_fields called on non-tuple: {self:?}"),
         }
     }
 
@@ -2283,6 +2283,8 @@ impl<'tcx> Ty<'tcx> {
                 Ty::new_projection(tcx, assoc_items[0], tcx.mk_args(&[self.into()]))
             }
 
+            ty::Pat(ty, _) => ty.discriminant_ty(tcx),
+
             ty::Bool
             | ty::Char
             | ty::Int(_)
@@ -2293,7 +2295,7 @@ impl<'tcx> Ty<'tcx> {
             | ty::Str
             | ty::Array(..)
             | ty::Slice(_)
-            | ty::RawPtr(_)
+            | ty::RawPtr(_, _)
             | ty::Ref(..)
             | ty::FnDef(..)
             | ty::FnPtr(..)
@@ -2364,6 +2366,7 @@ impl<'tcx> Ty<'tcx> {
             ty::Param(_) | ty::Alias(..) => Err(tail),
 
             ty::Infer(ty::TyVar(_))
+            | ty::Pat(..)
             | ty::Bound(..)
             | ty::Placeholder(..)
             | ty::Infer(ty::FreshTy(_) | ty::FreshIntTy(_) | ty::FreshFloatTy(_)) => bug!(
@@ -2456,6 +2459,25 @@ impl<'tcx> Ty<'tcx> {
         }
     }
 
+    /// Like [`Ty::to_opt_closure_kind`], but it caps the "maximum" closure kind
+    /// to `FnMut`. This is because although we have three capability states,
+    /// `AsyncFn`/`AsyncFnMut`/`AsyncFnOnce`, we only need to distinguish two coroutine
+    /// bodies: by-ref and by-value.
+    ///
+    /// See the definition of `AsyncFn` and `AsyncFnMut` and the `CallRefFuture`
+    /// associated type for why we don't distinguish [`ty::ClosureKind::Fn`] and
+    /// [`ty::ClosureKind::FnMut`] for the purpose of the generated MIR bodies.
+    ///
+    /// This method should be used when constructing a `Coroutine` out of a
+    /// `CoroutineClosure`, when the `Coroutine`'s `kind` field is being populated
+    /// directly from the `CoroutineClosure`'s `kind`.
+    pub fn from_coroutine_closure_kind(tcx: TyCtxt<'tcx>, kind: ty::ClosureKind) -> Ty<'tcx> {
+        match kind {
+            ty::ClosureKind::Fn | ty::ClosureKind::FnMut => tcx.types.i16,
+            ty::ClosureKind::FnOnce => tcx.types.i32,
+        }
+    }
+
     /// Fast path helper for testing if a type is `Sized`.
     ///
     /// Returning true means the type is known to be sized. Returning
@@ -2481,6 +2503,7 @@ impl<'tcx> Ty<'tcx> {
             | ty::Coroutine(..)
             | ty::CoroutineWitness(..)
             | ty::Array(..)
+            | ty::Pat(..)
             | ty::Closure(..)
             | ty::CoroutineClosure(..)
             | ty::Never
@@ -2534,6 +2557,8 @@ impl<'tcx> Ty<'tcx> {
             ty::Tuple(field_tys) => {
                 field_tys.len() <= 3 && field_tys.iter().all(Self::is_trivially_pure_clone_copy)
             }
+
+            ty::Pat(ty, _) => ty.is_trivially_pure_clone_copy(),
 
             // Sometimes traits aren't implemented for every ABI or arity,
             // because we can't be generic over everything yet.
@@ -2616,8 +2641,9 @@ impl<'tcx> Ty<'tcx> {
             | Foreign(_)
             | Str
             | Array(_, _)
+            | Pat(_, _)
             | Slice(_)
-            | RawPtr(_)
+            | RawPtr(_, _)
             | Ref(_, _, _)
             | FnDef(_, _)
             | FnPtr(_)
@@ -2640,7 +2666,7 @@ impl<'tcx> Ty<'tcx> {
 /// a miscompilation or unsoundness.
 ///
 /// When in doubt, use `VarianceDiagInfo::default()`
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum VarianceDiagInfo<'tcx> {
     /// No additional information - this is the default.
     /// We will not add any additional information to error messages.
@@ -2671,7 +2697,7 @@ impl<'tcx> VarianceDiagInfo<'tcx> {
 }
 
 // Some types are used a lot. Make sure they don't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
 mod size_asserts {
     use super::*;
     use rustc_data_structures::static_assert_size;

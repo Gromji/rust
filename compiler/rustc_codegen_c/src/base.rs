@@ -72,6 +72,8 @@ impl OngoingCodegen {
             object: Some(path),
             bytecode: None,
             dwarf_object: None,
+            assembly: None,
+            llvm_ir: None,
         }];
 
         CodegenResults {

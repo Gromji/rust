@@ -138,7 +138,7 @@ fn push_debuginfo_type_name<'tcx>(
                 output.push(')');
             }
         }
-        ty::RawPtr(ty::TypeAndMut { ty: inner_type, mutbl }) => {
+        ty::RawPtr(inner_type, mutbl) => {
             if cpp_like_debuginfo {
                 match mutbl {
                     Mutability::Not => output.push_str("ptr_const$<"),
@@ -200,6 +200,16 @@ fn push_debuginfo_type_name<'tcx>(
                     )
                     .unwrap(),
                 }
+            }
+        }
+        ty::Pat(inner_type, pat) => {
+            if cpp_like_debuginfo {
+                output.push_str("pat$<");
+                push_debuginfo_type_name(tcx, inner_type, true, output, visited);
+                // FIXME(wg-debugging): implement CPP like printing for patterns.
+                write!(output, ",{:?}>", pat).unwrap();
+            } else {
+                write!(output, "{:?}", t).unwrap();
             }
         }
         ty::Slice(inner_type) => {

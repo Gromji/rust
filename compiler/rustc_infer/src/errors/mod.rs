@@ -1263,24 +1263,6 @@ pub enum SuggestAccessingField<'a> {
 }
 
 #[derive(Subdiagnostic)]
-pub enum SuggestBoxingForReturnImplTrait {
-    #[multipart_suggestion(infer_sbfrit_change_return_type, applicability = "maybe-incorrect")]
-    ChangeReturnType {
-        #[suggestion_part(code = "Box<dyn")]
-        start_sp: Span,
-        #[suggestion_part(code = ">")]
-        end_sp: Span,
-    },
-    #[multipart_suggestion(infer_sbfrit_box_return_expr, applicability = "maybe-incorrect")]
-    BoxReturnExpr {
-        #[suggestion_part(code = "Box::new(")]
-        starts: Vec<Span>,
-        #[suggestion_part(code = ")")]
-        ends: Vec<Span>,
-    },
-}
-
-#[derive(Subdiagnostic)]
 #[multipart_suggestion(infer_stp_wrap_one, applicability = "maybe-incorrect")]
 pub struct SuggestTuplePatternOne {
     pub variant: String,
@@ -1339,15 +1321,12 @@ pub enum TypeErrorAdditionalDiags {
         span: Span,
         code: String,
     },
-    #[suggestion(
-        infer_meant_str_literal,
-        code = "\"{code}\"",
-        applicability = "machine-applicable"
-    )]
+    #[multipart_suggestion(infer_meant_str_literal, applicability = "machine-applicable")]
     MeantStrLiteral {
-        #[primary_span]
-        span: Span,
-        code: String,
+        #[suggestion_part(code = "\"")]
+        start: Span,
+        #[suggestion_part(code = "\"")]
+        end: Span,
     },
     #[suggestion(
         infer_consider_specifying_length,

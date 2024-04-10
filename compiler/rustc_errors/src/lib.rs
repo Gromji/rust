@@ -7,7 +7,6 @@
 #![allow(internal_features)]
 #![allow(rustc::diagnostic_outside_of_impl)]
 #![allow(rustc::untranslatable_diagnostic)]
-#![cfg_attr(bootstrap, feature(min_specialization))]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
 #![feature(array_windows)]
@@ -103,9 +102,9 @@ pub type PResult<'a, T> = Result<T, PErr<'a>>;
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
 // `PResult` is used a lot. Make sure it doesn't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
 rustc_data_structures::static_assert_size!(PResult<'_, ()>, 16);
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
 rustc_data_structures::static_assert_size!(PResult<'_, bool>, 16);
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash, Encodable, Decodable)]
@@ -613,12 +612,18 @@ impl DiagCtxt {
         Self { inner: Lock::new(DiagCtxtInner::new(emitter)) }
     }
 
-    pub fn make_silent(&mut self, fallback_bundle: LazyFallbackBundle, fatal_note: Option<String>) {
+    pub fn make_silent(
+        &mut self,
+        fallback_bundle: LazyFallbackBundle,
+        fatal_note: Option<String>,
+        emit_fatal_diagnostic: bool,
+    ) {
         self.wrap_emitter(|old_dcx| {
             Box::new(emitter::SilentEmitter {
                 fallback_bundle,
                 fatal_dcx: DiagCtxt { inner: Lock::new(old_dcx) },
                 fatal_note,
+                emit_fatal_diagnostic,
             })
         });
     }
@@ -1943,6 +1948,39 @@ pub fn report_ambiguity_error<'a, G: EmissionGuarantee>(
     diag.span_note(ambiguity.b2_span, ambiguity.b2_note_msg);
     for help_msg in ambiguity.b2_help_msgs {
         diag.help(help_msg);
+    }
+}
+
+/// Grammatical tool for displaying messages to end users in a nice form.
+///
+/// Returns "an" if the given string starts with a vowel, and "a" otherwise.
+pub fn a_or_an(s: &str) -> &'static str {
+    let mut chars = s.chars();
+    let Some(mut first_alpha_char) = chars.next() else {
+        return "a";
+    };
+    if first_alpha_char == '`' {
+        let Some(next) = chars.next() else {
+            return "a";
+        };
+        first_alpha_char = next;
+    }
+    if ["a", "e", "i", "o", "u", "&"].contains(&&first_alpha_char.to_lowercase().to_string()[..]) {
+        "an"
+    } else {
+        "a"
+    }
+}
+
+/// Grammatical tool for displaying messages to end users in a nice form.
+///
+/// Take a list ["a", "b", "c"] and output a display friendly version "a, b and c"
+pub fn display_list_with_comma_and<T: std::fmt::Display>(v: &[T]) -> String {
+    match v.len() {
+        0 => "".to_string(),
+        1 => v[0].to_string(),
+        2 => format!("{} and {}", v[0], v[1]),
+        _ => format!("{}, {}", v[0], display_list_with_comma_and(&v[1..])),
     }
 }
 

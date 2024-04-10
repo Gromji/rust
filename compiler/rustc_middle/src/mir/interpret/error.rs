@@ -88,7 +88,7 @@ pub type EvalToConstValueResult<'tcx> = Result<ConstValue<'tcx>, ErrorHandled>;
 /// This is needed in `thir::pattern::lower_inline_const`.
 pub type EvalToValTreeResult<'tcx> = Result<Option<ValTree<'tcx>>, ErrorHandled>;
 
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
 static_assert_size!(InterpErrorInfo<'_>, 8);
 
 /// Packages the kind of error we got from the const code interpreter
@@ -482,6 +482,8 @@ pub enum ResourceExhaustionInfo {
     MemoryExhausted,
     /// The address space (of the target) is full.
     AddressSpaceFull,
+    /// The compiler got an interrupt signal (a user ran out of patience).
+    Interrupted,
 }
 
 /// A trait for machine-specific errors (or other "machine stop" conditions).

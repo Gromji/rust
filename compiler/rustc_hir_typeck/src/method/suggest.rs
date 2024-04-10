@@ -49,7 +49,6 @@ use std::borrow::Cow;
 use super::probe::{AutorefOrPtrAdjustment, IsSuggestion, Mode, ProbeScope};
 use super::{CandidateSource, MethodError, NoMatchData};
 use rustc_hir::intravisit::Visitor;
-use std::cmp::{self, Ordering};
 use std::iter;
 
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
@@ -304,11 +303,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
                 if let ty::Ref(region, t_type, mutability) = rcvr_ty.kind() {
                     if needs_mut {
-                        let trait_type = Ty::new_ref(
-                            self.tcx,
-                            *region,
-                            ty::TypeAndMut { ty: *t_type, mutbl: mutability.invert() },
-                        );
+                        let trait_type =
+                            Ty::new_ref(self.tcx, *region, *t_type, mutability.invert());
                         let msg = format!("you need `{trait_type}` instead of `{rcvr_ty}`");
                         let mut kind = &self_expr.kind;
                         while let hir::ExprKind::AddrOf(_, _, expr)
@@ -533,7 +529,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 Applicability::MachineApplicable,
             );
         }
-        if let ty::RawPtr(_) = &rcvr_ty.kind() {
+        if let ty::RawPtr(_, _) = &rcvr_ty.kind() {
             err.note(
                 "try using `<*const T>::as_ref()` to get a reference to the \
                  type behind the pointer: https://doc.rust-lang.org/std/\
@@ -778,7 +774,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         let projection_ty = pred.skip_binder().projection_ty;
 
                         let args_with_infer_self = tcx.mk_args_from_iter(
-                            iter::once(Ty::new_var(tcx, ty::TyVid::from_u32(0)).into())
+                            iter::once(Ty::new_var(tcx, ty::TyVid::ZERO).into())
                                 .chain(projection_ty.args.iter().skip(1)),
                         );
 
@@ -875,7 +871,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 match pred.kind().skip_binder() {
                                     ty::PredicateKind::Clause(ty::ClauseKind::Trait(pred)) => {
                                         Some(pred.def_id()) == self.tcx.lang_items().sized_trait()
-                                            && pred.polarity == ty::ImplPolarity::Positive
+                                            && pred.polarity == ty::PredicatePolarity::Positive
                                     }
                                     _ => false,
                                 }
@@ -1189,7 +1185,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         })
                         .collect::<Vec<_>>();
                     if !inherent_impls_candidate.is_empty() {
-                        inherent_impls_candidate.sort();
+                        inherent_impls_candidate.sort_by_key(|id| self.tcx.def_path_str(id));
                         inherent_impls_candidate.dedup();
 
                         // number of types to show at most
@@ -1570,7 +1566,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         sources: &mut Vec<CandidateSource>,
         sugg_span: Option<Span>,
     ) {
-        sources.sort();
+        sources.sort_by_key(|source| match source {
+            CandidateSource::Trait(id) => (0, self.tcx.def_path_str(id)),
+            CandidateSource::Impl(id) => (1, self.tcx.def_path_str(id)),
+        });
         sources.dedup();
         // Dynamic limit to avoid hiding just one candidate, which is silly.
         let limit = if sources.len() == 5 { 5 } else { 4 };
@@ -2166,7 +2165,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         match (filename, parent_node) {
                             (
                                 FileName::Real(_),
-                                Node::Local(hir::Local {
+                                Node::LetStmt(hir::LetStmt {
                                     source: hir::LocalSource::Normal,
                                     ty,
                                     ..
@@ -2221,7 +2220,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 impl<'v> Visitor<'v> for LetVisitor {
                     type Result = ControlFlow<Option<&'v hir::Expr<'v>>>;
                     fn visit_stmt(&mut self, ex: &'v hir::Stmt<'v>) -> Self::Result {
-                        if let hir::StmtKind::Let(&hir::Local { pat, init, .. }) = ex.kind
+                        if let hir::StmtKind::Let(&hir::LetStmt { pat, init, .. }) = ex.kind
                             && let Binding(_, _, ident, ..) = pat.kind
                             && ident.name == self.ident_name
                         {
@@ -2552,7 +2551,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 _ => None,
             })
             .collect();
-        preds.sort_by_key(|pred| (pred.def_id(), pred.self_ty()));
+        preds.sort_by_key(|pred| pred.trait_ref.to_string());
         let def_ids = preds
             .iter()
             .filter_map(|pred| match pred.self_ty().kind() {
@@ -2666,7 +2665,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 traits.push(trait_pred.def_id());
             }
         }
-        traits.sort();
+        traits.sort_by_key(|id| self.tcx.def_path_str(id));
         traits.dedup();
 
         let len = traits.len();
@@ -2889,7 +2888,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     ) -> bool {
         if !valid_out_of_scope_traits.is_empty() {
             let mut candidates = valid_out_of_scope_traits;
-            candidates.sort();
+            candidates.sort_by_key(|id| self.tcx.def_path_str(id));
             candidates.dedup();
 
             // `TryFrom` and `FromIterator` have no methods
@@ -3215,8 +3214,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
 
         if !candidates.is_empty() {
-            // Sort from most relevant to least relevant.
-            candidates.sort_by_key(|&info| cmp::Reverse(info));
+            // Sort local crate results before others
+            candidates
+                .sort_by_key(|&info| (!info.def_id.is_local(), self.tcx.def_path_str(info.def_id)));
             candidates.dedup();
 
             let param_type = match rcvr_ty.kind() {
@@ -3264,8 +3264,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 Colon,
                                 Nothing,
                             }
-                            let ast_generics = hir.get_generics(id.owner.def_id).unwrap();
-                            let trait_def_ids: DefIdSet = ast_generics
+                            let hir_generics = hir.get_generics(id.owner.def_id).unwrap();
+                            let trait_def_ids: DefIdSet = hir_generics
                                 .bounds_for_param(def_id)
                                 .flat_map(|bp| bp.bounds.iter())
                                 .filter_map(|bound| bound.trait_ref()?.trait_def_id())
@@ -3277,7 +3277,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 "restrict type parameter `{}` with",
                                 param.name.ident(),
                             ));
-                            let bounds_span = ast_generics.bounds_span_for_suggestions(def_id);
+                            let bounds_span = hir_generics.bounds_span_for_suggestions(def_id);
                             if rcvr_ty.is_ref() && param.is_impl_trait() && bounds_span.is_some() {
                                 err.multipart_suggestions(
                                     msg,
@@ -3367,7 +3367,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 "inherent impls can't be candidates, only trait impls can be",
                             )
                         })
-                        .filter(|header| header.polarity == ty::ImplPolarity::Negative)
+                        .filter(|header| header.polarity != ty::ImplPolarity::Positive)
                         .any(|header| {
                             let imp = header.trait_ref.instantiate_identity();
                             let imp_simp =
@@ -3564,31 +3564,9 @@ pub enum SelfSource<'a> {
     MethodCall(&'a hir::Expr<'a> /* rcvr */),
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub struct TraitInfo {
     pub def_id: DefId,
-}
-
-impl PartialEq for TraitInfo {
-    fn eq(&self, other: &TraitInfo) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-impl Eq for TraitInfo {}
-impl PartialOrd for TraitInfo {
-    fn partial_cmp(&self, other: &TraitInfo) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for TraitInfo {
-    fn cmp(&self, other: &TraitInfo) -> Ordering {
-        // Local crates are more important than remote ones (local:
-        // `cnum == 0`), and otherwise we throw in the defid for totality.
-
-        let lhs = (other.def_id.krate, other.def_id);
-        let rhs = (self.def_id.krate, self.def_id);
-        lhs.cmp(&rhs)
-    }
 }
 
 /// Retrieves all traits in this crate and any dependent crates,

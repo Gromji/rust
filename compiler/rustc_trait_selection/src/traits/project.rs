@@ -2,7 +2,6 @@
 
 use std::ops::ControlFlow;
 
-use super::check_args_compatible;
 use super::specialization_graph;
 use super::translate_args;
 use super::util;
@@ -432,7 +431,7 @@ pub(super) fn opt_normalize_projection_type<'a, 'b, 'tcx>(
 
             let projected_term = selcx.infcx.resolve_vars_if_possible(projected_term);
 
-            let mut result = if projected_term.has_projections() {
+            let mut result = if projected_term.has_aliases() {
                 let normalized_ty = normalize_with_depth_to(
                     selcx,
                     param_env,
@@ -508,7 +507,7 @@ pub(super) fn opt_normalize_projection_type<'a, 'b, 'tcx>(
 /// because it contains `[type error]`. Yuck! (See issue #29857 for
 /// one case where this arose.)
 fn normalize_to_error<'a, 'tcx>(
-    selcx: &mut SelectionContext<'a, 'tcx>,
+    selcx: &SelectionContext<'a, 'tcx>,
     param_env: ty::ParamEnv<'tcx>,
     projection_ty: ty::AliasTy<'tcx>,
     cause: ObligationCause<'tcx>,
@@ -596,7 +595,7 @@ pub fn normalize_inherent_projection<'a, 'b, 'tcx>(
     let ty = tcx.type_of(alias_ty.def_id).instantiate(tcx, args);
 
     let mut ty = selcx.infcx.resolve_vars_if_possible(ty);
-    if ty.has_projections() {
+    if ty.has_aliases() {
         ty = normalize_with_depth_to(selcx, param_env, cause.clone(), depth + 1, ty, obligations);
     }
 
@@ -794,6 +793,9 @@ fn assemble_candidates_from_trait_def<'cx, 'tcx>(
             let Some(clause) = clause.as_projection_clause() else {
                 return ControlFlow::Continue(());
             };
+            if clause.projection_def_id() != obligation.predicate.def_id {
+                return ControlFlow::Continue(());
+            }
 
             let is_match =
                 selcx.infcx.probe(|_| selcx.match_projection_projections(obligation, clause, true));
@@ -1046,6 +1048,7 @@ fn assemble_candidates_from_impls<'cx, 'tcx>(
                         | ty::Foreign(_)
                         | ty::Str
                         | ty::Array(..)
+                        | ty::Pat(..)
                         | ty::Slice(_)
                         | ty::RawPtr(..)
                         | ty::Ref(..)
@@ -1097,6 +1100,7 @@ fn assemble_candidates_from_impls<'cx, 'tcx>(
                         | ty::Float(_)
                         | ty::Str
                         | ty::Array(..)
+                        | ty::Pat(..)
                         | ty::Slice(_)
                         | ty::RawPtr(..)
                         | ty::Ref(..)
@@ -1597,7 +1601,10 @@ fn confirm_closure_candidate<'cx, 'tcx>(
                 // If we know the kind and upvars, use that directly.
                 // Otherwise, defer to `AsyncFnKindHelper::Upvars` to delay
                 // the projection, like the `AsyncFn*` traits do.
-                let output_ty = if let Some(_) = kind_ty.to_opt_closure_kind() {
+                let output_ty = if let Some(_) = kind_ty.to_opt_closure_kind()
+                    // Fall back to projection if upvars aren't constrained
+                    && !args.tupled_upvars_ty().is_ty_var()
+                {
                     sig.to_coroutine_given_kind_and_upvars(
                         tcx,
                         args.parent_args(),
@@ -1726,8 +1733,11 @@ fn confirm_async_closure_candidate<'cx, 'tcx>(
             let sig = args.coroutine_closure_sig().skip_binder();
 
             let term = match item_name {
-                sym::CallOnceFuture | sym::CallMutFuture | sym::CallFuture => {
-                    if let Some(closure_kind) = kind_ty.to_opt_closure_kind() {
+                sym::CallOnceFuture | sym::CallRefFuture => {
+                    if let Some(closure_kind) = kind_ty.to_opt_closure_kind()
+                        // Fall back to projection if upvars aren't constrained
+                        && !args.tupled_upvars_ty().is_ty_var()
+                    {
                         if !closure_kind.extends(goal_kind) {
                             bug!("we should not be confirming if the closure kind is not met");
                         }
@@ -1787,7 +1797,7 @@ fn confirm_async_closure_candidate<'cx, 'tcx>(
                     obligation.predicate.def_id,
                     [self_ty, sig.tupled_inputs_ty],
                 ),
-                sym::CallMutFuture | sym::CallFuture => ty::AliasTy::new(
+                sym::CallRefFuture => ty::AliasTy::new(
                     tcx,
                     obligation.predicate.def_id,
                     [ty::GenericArg::from(self_ty), sig.tupled_inputs_ty.into(), env_region.into()],
@@ -1803,7 +1813,7 @@ fn confirm_async_closure_candidate<'cx, 'tcx>(
             let sig = bound_sig.skip_binder();
 
             let term = match item_name {
-                sym::CallOnceFuture | sym::CallMutFuture | sym::CallFuture => sig.output(),
+                sym::CallOnceFuture | sym::CallRefFuture => sig.output(),
                 sym::Output => {
                     let future_trait_def_id = tcx.require_lang_item(LangItem::Future, None);
                     let future_output_def_id = tcx
@@ -1822,7 +1832,7 @@ fn confirm_async_closure_candidate<'cx, 'tcx>(
                     obligation.predicate.def_id,
                     [self_ty, Ty::new_tup(tcx, sig.inputs())],
                 ),
-                sym::CallMutFuture | sym::CallFuture => ty::AliasTy::new(
+                sym::CallRefFuture => ty::AliasTy::new(
                     tcx,
                     obligation.predicate.def_id,
                     [
@@ -1842,7 +1852,7 @@ fn confirm_async_closure_candidate<'cx, 'tcx>(
             let sig = bound_sig.skip_binder();
 
             let term = match item_name {
-                sym::CallOnceFuture | sym::CallMutFuture | sym::CallFuture => sig.output(),
+                sym::CallOnceFuture | sym::CallRefFuture => sig.output(),
                 sym::Output => {
                     let future_trait_def_id = tcx.require_lang_item(LangItem::Future, None);
                     let future_output_def_id = tcx
@@ -1859,7 +1869,7 @@ fn confirm_async_closure_candidate<'cx, 'tcx>(
                 sym::CallOnceFuture | sym::Output => {
                     ty::AliasTy::new(tcx, obligation.predicate.def_id, [self_ty, sig.inputs()[0]])
                 }
-                sym::CallMutFuture | sym::CallFuture => ty::AliasTy::new(
+                sym::CallRefFuture => ty::AliasTy::new(
                     tcx,
                     obligation.predicate.def_id,
                     [ty::GenericArg::from(self_ty), sig.inputs()[0].into(), env_region.into()],
@@ -2030,7 +2040,7 @@ fn confirm_impl_candidate<'cx, 'tcx>(
     } else {
         ty.map_bound(|ty| ty.into())
     };
-    if !check_args_compatible(tcx, assoc_ty.item, args) {
+    if !tcx.check_args_compatible(assoc_ty.item.def_id, args) {
         let err = Ty::new_error_with_message(
             tcx,
             obligation.cause.span,

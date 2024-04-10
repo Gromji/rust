@@ -206,7 +206,7 @@ impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
                     .get(pat.hir_id)
                     .expect("missing binding mode");
 
-                if let ty::BindByReference(_) = bm {
+                if matches!(bm.0, hir::ByRef::Yes(_)) {
                     // a bind-by-ref means that the base_ty will be the type of the ident itself,
                     // but what we want here is the type of the underlying value being borrowed.
                     // So peel off one-level, turning the &T into T.
@@ -268,11 +268,7 @@ impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
             adjustment::Adjust::Deref(overloaded) => {
                 // Equivalent to *expr or something similar.
                 let base = if let Some(deref) = overloaded {
-                    let ref_ty = Ty::new_ref(
-                        self.tcx(),
-                        deref.region,
-                        ty::TypeAndMut { ty: target, mutbl: deref.mutbl },
-                    );
+                    let ref_ty = Ty::new_ref(self.tcx(), deref.region, target, deref.mutbl);
                     self.cat_rvalue(expr.hir_id, ref_ty)
                 } else {
                     previous()?
@@ -479,7 +475,7 @@ impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
         let ty::Ref(region, _, mutbl) = *base_ty.kind() else {
             span_bug!(expr.span, "cat_overloaded_place: base is not a reference");
         };
-        let ref_ty = Ty::new_ref(self.tcx(), region, ty::TypeAndMut { ty: place_ty, mutbl });
+        let ref_ty = Ty::new_ref(self.tcx(), region, place_ty, mutbl);
 
         let base = self.cat_rvalue(expr.hir_id, ref_ty);
         self.cat_deref(expr, base)
@@ -719,7 +715,7 @@ impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
                 self.cat_pattern_(place_with_id, subpat, op)?;
             }
 
-            PatKind::Box(subpat) | PatKind::Ref(subpat, _) => {
+            PatKind::Box(subpat) | PatKind::Ref(subpat, _) | PatKind::Deref(subpat) => {
                 // box p1, &p1, &mut p1. we can ignore the mutability of
                 // PatKind::Ref since that information is already contained
                 // in the type.

@@ -168,7 +168,7 @@ impl<'tcx> MutVisitor<'tcx> for PinArgVisitor<'tcx> {
                 Place {
                     local: SELF_ARG,
                     projection: self.tcx().mk_place_elems(&[ProjectionElem::Field(
-                        FieldIdx::new(0),
+                        FieldIdx::ZERO,
                         self.ref_coroutine_ty,
                     )]),
                 },
@@ -267,7 +267,7 @@ impl<'tcx> TransformVisitor<'tcx> {
                 Rvalue::Aggregate(
                     Box::new(AggregateKind::Adt(
                         option_def_id,
-                        VariantIdx::from_usize(0),
+                        VariantIdx::ZERO,
                         self.tcx.mk_args(&[self.old_yield_ty.into()]),
                         None,
                         None,
@@ -329,7 +329,7 @@ impl<'tcx> TransformVisitor<'tcx> {
                     Rvalue::Aggregate(
                         Box::new(AggregateKind::Adt(
                             poll_def_id,
-                            VariantIdx::from_usize(0),
+                            VariantIdx::ZERO,
                             args,
                             None,
                             None,
@@ -358,7 +358,7 @@ impl<'tcx> TransformVisitor<'tcx> {
                     Rvalue::Aggregate(
                         Box::new(AggregateKind::Adt(
                             option_def_id,
-                            VariantIdx::from_usize(0),
+                            VariantIdx::ZERO,
                             args,
                             None,
                             None,
@@ -420,7 +420,7 @@ impl<'tcx> TransformVisitor<'tcx> {
                     Rvalue::Aggregate(
                         Box::new(AggregateKind::Adt(
                             coroutine_state_def_id,
-                            VariantIdx::from_usize(0),
+                            VariantIdx::ZERO,
                             args,
                             None,
                             None,
@@ -570,11 +570,7 @@ impl<'tcx> MutVisitor<'tcx> for TransformVisitor<'tcx> {
 fn make_coroutine_state_argument_indirect<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     let coroutine_ty = body.local_decls.raw[1].ty;
 
-    let ref_coroutine_ty = Ty::new_ref(
-        tcx,
-        tcx.lifetimes.re_erased,
-        ty::TypeAndMut { ty: coroutine_ty, mutbl: Mutability::Mut },
-    );
+    let ref_coroutine_ty = Ty::new_mut_ref(tcx, tcx.lifetimes.re_erased, coroutine_ty);
 
     // Replace the by value coroutine argument
     body.local_decls.raw[1].ty = ref_coroutine_ty;
@@ -1230,7 +1226,7 @@ fn create_coroutine_drop_shim<'tcx>(
     tcx: TyCtxt<'tcx>,
     transform: &TransformVisitor<'tcx>,
     coroutine_ty: Ty<'tcx>,
-    body: &mut Body<'tcx>,
+    body: &Body<'tcx>,
     drop_clean: BasicBlock,
 ) -> Body<'tcx> {
     let mut body = body.clone();
@@ -1265,10 +1261,8 @@ fn create_coroutine_drop_shim<'tcx>(
     make_coroutine_state_argument_indirect(tcx, &mut body);
 
     // Change the coroutine argument from &mut to *mut
-    body.local_decls[SELF_ARG] = LocalDecl::with_source_info(
-        Ty::new_ptr(tcx, ty::TypeAndMut { ty: coroutine_ty, mutbl: hir::Mutability::Mut }),
-        source_info,
-    );
+    body.local_decls[SELF_ARG] =
+        LocalDecl::with_source_info(Ty::new_mut_ptr(tcx, coroutine_ty), source_info);
 
     // Make sure we remove dead blocks to remove
     // unrelated code from the resume part of the function

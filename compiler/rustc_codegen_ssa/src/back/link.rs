@@ -785,7 +785,7 @@ fn link_natively<'a>(
     let mut i = 0;
     loop {
         i += 1;
-        prog = sess.time("run_linker", || exec_linker(sess, &cmd, out_filename, tmpdir));
+        prog = sess.time("run_linker", || exec_linker(sess, &cmd, out_filename, flavor, tmpdir));
         let Ok(ref output) = prog else {
             break;
         };
@@ -1576,6 +1576,7 @@ fn exec_linker(
     sess: &Session,
     cmd: &Command,
     out_filename: &Path,
+    flavor: LinkerFlavor,
     tmpdir: &Path,
 ) -> io::Result<Output> {
     // When attempting to spawn the linker we run a risk of blowing out the
@@ -1584,9 +1585,9 @@ fn exec_linker(
     //
     // Here we attempt to handle errors from the OS saying "your list of
     // arguments is too big" by reinvoking the linker again with an `@`-file
-    // that contains all the arguments. The theory is that this is then
-    // accepted on all linkers and the linker will read all its options out of
-    // there instead of looking at the command line.
+    // that contains all the arguments (aka 'response' files).
+    // The theory is that this is then accepted on all linkers and the linker
+    // will read all its options out of there instead of looking at the command line.
     if !cmd.very_likely_to_exceed_some_spawn_limit() {
         match cmd.command().stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(child) => {
@@ -1606,8 +1607,12 @@ fn exec_linker(
     let mut args = String::new();
     for arg in cmd2.take_args() {
         args.push_str(
-            &Escape { arg: arg.to_str().unwrap(), is_like_msvc: sess.target.is_like_msvc }
-                .to_string(),
+            &Escape {
+                arg: arg.to_str().unwrap(),
+                // LLD also uses MSVC-like parsing for @-files by default when running on windows hosts
+                is_like_msvc: sess.target.is_like_msvc || (cfg!(windows) && flavor.uses_lld()),
+            }
+            .to_string(),
         );
         args.push('\n');
     }
@@ -2084,14 +2089,14 @@ fn add_rpath_args(
                     .map(|(path, _)| &**path)
             })
             .collect::<Vec<_>>();
-        let mut rpath_config = RPathConfig {
+        let rpath_config = RPathConfig {
             libs: &*libs,
             out_filename: out_filename.to_path_buf(),
             has_rpath: sess.target.has_rpath,
             is_like_osx: sess.target.is_like_osx,
             linker_is_gnu: sess.target.linker_flavor.is_gnu(),
         };
-        cmd.args(&rpath::get_rpath_flags(&mut rpath_config));
+        cmd.args(&rpath::get_rpath_flags(&rpath_config));
     }
 }
 
@@ -2941,7 +2946,7 @@ fn add_apple_sdk(cmd: &mut dyn Linker, sess: &Session, flavor: LinkerFlavor) {
     let os = &sess.target.os;
     let llvm_target = &sess.target.llvm_target;
     if sess.target.vendor != "apple"
-        || !matches!(os.as_ref(), "ios" | "tvos" | "watchos" | "macos")
+        || !matches!(os.as_ref(), "ios" | "tvos" | "watchos" | "visionos" | "macos")
         || !matches!(flavor, LinkerFlavor::Darwin(..))
     {
         return;
@@ -2966,6 +2971,8 @@ fn add_apple_sdk(cmd: &mut dyn Linker, sess: &Session, flavor: LinkerFlavor) {
         ("arm64_32", "watchos") => "watchos",
         ("aarch64", "watchos") if llvm_target.ends_with("-simulator") => "watchsimulator",
         ("aarch64", "watchos") => "watchos",
+        ("aarch64", "visionos") if llvm_target.ends_with("-simulator") => "xrsimulator",
+        ("aarch64", "visionos") => "xros",
         ("arm", "watchos") => "watchos",
         (_, "macos") => "macosx",
         _ => {
@@ -3022,6 +3029,10 @@ fn get_apple_sdk_root(sdk_name: &str) -> Result<String, errors::AppleSdkRootErro
                     || sdkroot.contains("MacOSX.platform") => {}
             "watchsimulator"
                 if sdkroot.contains("WatchOS.platform") || sdkroot.contains("MacOSX.platform") => {}
+            "visionos"
+                if sdkroot.contains("XROS.platform") || sdkroot.contains("MacOSX.platform") => {}
+            "visionossimulator"
+                if sdkroot.contains("XROS.platform") || sdkroot.contains("MacOSX.platform") => {}
             // Ignore `SDKROOT` if it's not a valid path.
             _ if !p.is_absolute() || p == Path::new("/") || !p.exists() => {}
             _ => return Ok(sdkroot),

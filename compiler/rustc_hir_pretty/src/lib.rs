@@ -113,7 +113,7 @@ impl<'a> State<'a> {
             // `hir_map` to reconstruct their full structure for pretty
             // printing.
             Node::Ctor(..) => panic!("cannot print isolated Ctor"),
-            Node::Local(a) => self.print_local_decl(a),
+            Node::LetStmt(a) => self.print_local_decl(a),
             Node::Crate(..) => panic!("cannot print Crate"),
             Node::WhereBoundPredicate(pred) => {
                 self.print_formal_generic_params(pred.bound_generic_params);
@@ -121,7 +121,7 @@ impl<'a> State<'a> {
                 self.print_bounds(":", pred.bounds);
             }
             Node::ArrayLenInfer(_) => self.word("_"),
-            Node::AssocOpaqueTy(..) => unreachable!(),
+            Node::Synthetic => unreachable!(),
             Node::Err(_) => self.word("/*ERROR*/"),
         }
     }
@@ -330,6 +330,11 @@ impl<'a> State<'a> {
                 self.word("_");
             }
             hir::TyKind::AnonAdt(..) => self.word("/* anonymous adt */"),
+            hir::TyKind::Pat(ty, pat) => {
+                self.print_type(ty);
+                self.word(" is ");
+                self.print_pat(pat);
+            }
         }
         self.end()
     }
@@ -1387,7 +1392,7 @@ impl<'a> State<'a> {
                 // Print `}`:
                 self.bclose_maybe_open(expr.span, true);
             }
-            hir::ExprKind::Let(&hir::Let { pat, ty, init, .. }) => {
+            hir::ExprKind::Let(&hir::LetExpr { pat, ty, init, .. }) => {
                 self.print_let(pat, ty, init);
             }
             hir::ExprKind::If(test, blk, elseopt) => {
@@ -1544,7 +1549,7 @@ impl<'a> State<'a> {
         self.end()
     }
 
-    fn print_local_decl(&mut self, loc: &hir::Local<'_>) {
+    fn print_local_decl(&mut self, loc: &hir::LetStmt<'_>) {
         self.print_pat(loc.pat);
         if let Some(ty) = loc.ty {
             self.word_space(":");
@@ -1721,11 +1726,14 @@ impl<'a> State<'a> {
             PatKind::Wild => self.word("_"),
             PatKind::Never => self.word("!"),
             PatKind::Binding(BindingAnnotation(by_ref, mutbl), _, ident, sub) => {
-                if by_ref == ByRef::Yes {
-                    self.word_nbsp("ref");
-                }
                 if mutbl.is_mut() {
                     self.word_nbsp("mut");
+                }
+                if let ByRef::Yes(rmutbl) = by_ref {
+                    self.word_nbsp("ref");
+                    if rmutbl.is_mut() {
+                        self.word_nbsp("mut");
+                    }
                 }
                 self.print_ident(ident);
                 if let Some(p) = sub {
@@ -1807,6 +1815,12 @@ impl<'a> State<'a> {
                 if is_range_inner {
                     self.pclose();
                 }
+            }
+            PatKind::Deref(inner) => {
+                self.word("deref!");
+                self.popen();
+                self.print_pat(inner);
+                self.pclose();
             }
             PatKind::Ref(inner, mutbl) => {
                 let is_range_inner = matches!(inner.kind, PatKind::Range(..));

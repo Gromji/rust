@@ -1,7 +1,7 @@
 use core::convert::TryInto;
 
 use crate::cmp;
-use crate::ffi::{CStr, CString};
+use crate::ffi::CStr;
 use crate::io;
 use crate::mem;
 use crate::num::NonZero;
@@ -101,10 +101,6 @@ impl Thread {
         // contact the teeos rustzone team.
     }
 
-    pub fn get_name() -> Option<CString> {
-        None
-    }
-
     /// only main thread could wait for sometime in teeos
     pub fn sleep(dur: Duration) {
         let sleep_millis = dur.as_millis();
@@ -149,18 +145,6 @@ pub fn available_parallelism() -> io::Result<NonZero<usize>> {
         io::ErrorKind::NotFound,
         "The number of hardware threads is not known for the target platform",
     ))
-}
-
-// stub
-pub mod guard {
-    use crate::ops::Range;
-    pub type Guard = Range<usize>;
-    pub unsafe fn current() -> Option<Guard> {
-        None
-    }
-    pub unsafe fn init() -> Option<Guard> {
-        None
-    }
 }
 
 fn min_stack_size(_: *const libc::pthread_attr_t) -> usize {

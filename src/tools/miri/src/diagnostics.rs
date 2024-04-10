@@ -46,6 +46,7 @@ pub enum TerminationInfo {
         op1: RacingOp,
         op2: RacingOp,
         extra: Option<&'static str>,
+        retag_explain: bool,
     },
 }
 
@@ -65,7 +66,7 @@ impl fmt::Display for TerminationInfo {
             Int2PtrWithStrictProvenance =>
                 write!(
                     f,
-                    "integer-to-pointer casts and `ptr::from_exposed_addr` are not supported with `-Zmiri-strict-provenance`"
+                    "integer-to-pointer casts and `ptr::with_exposed_provenance` are not supported with `-Zmiri-strict-provenance`"
                 ),
             StackedBorrowsUb { msg, .. } => write!(f, "{msg}"),
             TreeBorrowsUb { title, .. } => write!(f, "{title}"),
@@ -263,11 +264,16 @@ pub fn report_error<'tcx, 'mir>(
                 vec![(Some(*span), format!("the `{link_name}` symbol is defined here"))],
             Int2PtrWithStrictProvenance =>
                 vec![(None, format!("use Strict Provenance APIs (https://doc.rust-lang.org/nightly/std/ptr/index.html#strict-provenance, https://crates.io/crates/sptr) instead"))],
-            DataRace { op1, extra, .. } => {
+            DataRace { op1, extra, retag_explain, .. } => {
                 let mut helps = vec![(Some(op1.span), format!("and (1) occurred earlier here"))];
                 if let Some(extra) = extra {
                     helps.push((None, format!("{extra}")));
                     helps.push((None, format!("see https://doc.rust-lang.org/nightly/std/sync/atomic/index.html#memory-model-for-atomic-accesses for more information about the Rust memory model")));
+                }
+                if *retag_explain {
+                    helps.push((None, "retags occur on all (re)borrows and as well as when references are copied or moved".to_owned()));
+                    helps.push((None, "retags permit optimizations that insert speculative reads or writes".to_owned()));
+                    helps.push((None, "therefore from the perspective of data races, a retag has the same implications as a read or write".to_owned()));
                 }
                 helps.push((None, format!("this indicates a bug in the program: it performed an invalid operation, and caused Undefined Behavior")));
                 helps.push((None, format!("see https://doc.rust-lang.org/nightly/reference/behavior-considered-undefined.html for further information")));
@@ -587,7 +593,7 @@ impl<'mir, 'tcx> MiriMachine<'mir, 'tcx> {
                     (
                         None,
                         format!(
-                            "This program is using integer-to-pointer casts or (equivalently) `ptr::from_exposed_addr`,"
+                            "This program is using integer-to-pointer casts or (equivalently) `ptr::with_exposed_provenance`,"
                         ),
                     ),
                     (
@@ -597,7 +603,7 @@ impl<'mir, 'tcx> MiriMachine<'mir, 'tcx> {
                     (
                         None,
                         format!(
-                            "See https://doc.rust-lang.org/nightly/std/ptr/fn.from_exposed_addr.html for more details on that operation."
+                            "See https://doc.rust-lang.org/nightly/std/ptr/fn.with_exposed_provenance.html for more details on that operation."
                         ),
                     ),
                     (
@@ -609,7 +615,7 @@ impl<'mir, 'tcx> MiriMachine<'mir, 'tcx> {
                     (
                         None,
                         format!(
-                            "You can then pass the `-Zmiri-strict-provenance` flag to Miri, to ensure you are not relying on `from_exposed_addr` semantics."
+                            "You can then pass the `-Zmiri-strict-provenance` flag to Miri, to ensure you are not relying on `with_exposed_provenance` semantics."
                         ),
                     ),
                     (

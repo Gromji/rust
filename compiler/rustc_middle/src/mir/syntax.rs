@@ -124,6 +124,7 @@ pub enum AnalysisPhase {
     /// * [`TerminatorKind::FalseEdge`]
     /// * [`StatementKind::FakeRead`]
     /// * [`StatementKind::AscribeUserType`]
+    /// * [`StatementKind::Coverage`] with [`CoverageKind::BlockMarker`] or [`CoverageKind::SpanMarker`]
     /// * [`Rvalue::Ref`] with `BorrowKind::Fake`
     ///
     /// Furthermore, `Deref` projections must be the first projection within any place (if they
@@ -372,7 +373,7 @@ pub enum StatementKind<'tcx> {
     ///
     /// Interpreters and codegen backends that don't support coverage instrumentation
     /// can usually treat this as a no-op.
-    Coverage(Box<Coverage>),
+    Coverage(CoverageKind),
 
     /// Denotes a call to an intrinsic that does not require an unwind path and always returns.
     /// This avoids adding a new block and a terminator for simple intrinsics.
@@ -514,12 +515,6 @@ pub enum FakeReadCause {
     /// index expression. Thus we create a fake borrow of `x` across the second
     /// indexer, which will cause a borrow check error.
     ForIndex,
-}
-
-#[derive(Clone, Debug, PartialEq, TyEncodable, TyDecodable, Hash, HashStable)]
-#[derive(TypeFoldable, TypeVisitable)]
-pub struct Coverage {
-    pub kind: CoverageKind,
 }
 
 #[derive(Clone, Debug, PartialEq, TyEncodable, TyDecodable, Hash, HashStable)]
@@ -1314,11 +1309,11 @@ pub enum Rvalue<'tcx> {
 pub enum CastKind {
     /// An exposing pointer to address cast. A cast between a pointer and an integer type, or
     /// between a function pointer and an integer type.
-    /// See the docs on `expose_addr` for more details.
-    PointerExposeAddress,
+    /// See the docs on `expose_provenance` for more details.
+    PointerExposeProvenance,
     /// An address-to-pointer cast that picks up an exposed provenance.
-    /// See the docs on `from_exposed_addr` for more details.
-    PointerFromExposedAddress,
+    /// See the docs on `with_exposed_provenance` for more details.
+    PointerWithExposedProvenance,
     /// Pointer related casts that are done by coercions. Note that reference-to-raw-ptr casts are
     /// translated into `&raw mut/const *r`, i.e., they are not actually casts.
     PointerCoercion(PointerCoercion),
@@ -1366,16 +1361,9 @@ pub enum NullOp<'tcx> {
     AlignOf,
     /// Returns the offset of a field
     OffsetOf(&'tcx List<(VariantIdx, FieldIdx)>),
-    /// Returns whether we want to check for library UB or language UB at monomorphization time.
-    /// Both kinds of UB evaluate to `true` in codegen, and only library UB evalutes to `true` in
-    /// const-eval/Miri, because the interpreter has its own better checks for language UB.
-    UbCheck(UbKind),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, TyEncodable, TyDecodable, Hash, HashStable)]
-pub enum UbKind {
-    LanguageUb,
-    LibraryUb,
+    /// Returns whether we should perform some UB-checking at runtime.
+    /// See the `ub_checks` intrinsic docs for details.
+    UbChecks,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1450,12 +1438,22 @@ pub enum BinOp {
     Ge,
     /// The `>` operator (greater than)
     Gt,
+    /// The `<=>` operator (three-way comparison, like `Ord::cmp`)
+    ///
+    /// This is supported only on the integer types and `char`, always returning
+    /// [`rustc_hir::LangItem::OrderingEnum`] (aka [`std::cmp::Ordering`]).
+    ///
+    /// [`Rvalue::BinaryOp`]`(BinOp::Cmp, A, B)` returns
+    /// - `Ordering::Less` (`-1_i8`, as a Scalar) if `A < B`
+    /// - `Ordering::Equal` (`0_i8`, as a Scalar) if `A == B`
+    /// - `Ordering::Greater` (`+1_i8`, as a Scalar) if `A > B`
+    Cmp,
     /// The `ptr.offset` operator
     Offset,
 }
 
 // Some nodes are used a lot. Make sure they don't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
 mod size_asserts {
     use super::*;
     // tidy-alphabetical-start
@@ -1464,5 +1462,6 @@ mod size_asserts {
     static_assert_size!(Place<'_>, 16);
     static_assert_size!(PlaceElem<'_>, 24);
     static_assert_size!(Rvalue<'_>, 40);
+    static_assert_size!(StatementKind<'_>, 16);
     // tidy-alphabetical-end
 }

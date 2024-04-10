@@ -8,11 +8,11 @@ use super::super::ByRefSized;
 use super::super::TrustedRandomAccessNoCoerce;
 use super::super::{ArrayChunks, Chain, Cloned, Copied, Cycle, Enumerate, Filter, FilterMap, Fuse};
 use super::super::{FlatMap, Flatten};
-use super::super::{FromIterator, Intersperse, IntersperseWith, Product, Sum, Zip};
 use super::super::{
     Inspect, Map, MapWhile, MapWindows, Peekable, Rev, Scan, Skip, SkipWhile, StepBy, Take,
     TakeWhile,
 };
+use super::super::{Intersperse, IntersperseWith, Product, Sum, Zip};
 
 fn _assert_is_object_safe(_: &dyn Iterator<Item = ()>) {}
 
@@ -1572,7 +1572,7 @@ pub trait Iterator {
     ///
     /// The returned iterator implements [`FusedIterator`], because once `self`
     /// returns `None`, even if it returns a `Some(T)` again in the next iterations,
-    /// we cannot put it into a contigious array buffer, and thus the returned iterator
+    /// we cannot put it into a contiguous array buffer, and thus the returned iterator
     /// should be fused.
     ///
     /// [`slice::windows()`]: slice::windows

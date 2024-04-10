@@ -34,7 +34,7 @@ use rustc_middle::infer::unify_key::{ConstVariableOrigin, ConstVariableOriginKin
 use rustc_middle::infer::unify_key::{ConstVidKey, EffectVidKey};
 use rustc_middle::mir::interpret::{ErrorHandled, EvalToValTreeResult};
 use rustc_middle::mir::ConstraintCategory;
-use rustc_middle::traits::{select, DefiningAnchor};
+use rustc_middle::traits::select;
 use rustc_middle::ty::error::{ExpectedFound, TypeError};
 use rustc_middle::ty::fold::BoundVarReplacerDelegate;
 use rustc_middle::ty::fold::{TypeFoldable, TypeFolder, TypeSuperFoldable};
@@ -229,23 +229,22 @@ impl<'tcx> InferCtxtInner<'tcx> {
             .expect("region constraints already solved")
             .with_log(&mut self.undo_log)
     }
+
+    // Iterates through the opaque type definitions without taking them; this holds the
+    // `InferCtxtInner` lock, so make sure to not do anything with `InferCtxt` side-effects
+    // while looping through this.
+    pub fn iter_opaque_types(
+        &self,
+    ) -> impl Iterator<Item = (ty::OpaqueTypeKey<'tcx>, ty::OpaqueHiddenType<'tcx>)> + '_ {
+        self.opaque_type_storage.opaque_types.iter().map(|(&k, v)| (k, v.hidden_type))
+    }
 }
 
 pub struct InferCtxt<'tcx> {
     pub tcx: TyCtxt<'tcx>,
 
-    /// The `DefId` of the item in whose context we are performing inference or typeck.
-    /// It is used to check whether an opaque type use is a defining use.
-    ///
-    /// If it is `DefiningAnchor::Bubble`, we can't resolve opaque types here and need to bubble up
-    /// the obligation. This frequently happens for
-    /// short lived InferCtxt within queries. The opaque type obligations are forwarded
-    /// to the outside until the end up in an `InferCtxt` for typeck or borrowck.
-    ///
-    /// Its default value is `DefiningAnchor::Bind(&[])`, which means no opaque types may be defined.
-    /// This way it is easier to catch errors that
-    /// might come up during inference or typeck.
-    pub defining_use_anchor: DefiningAnchor<'tcx>,
+    /// The `DefIds` of the opaque types that may have their hidden types constrained.
+    defining_opaque_types: &'tcx ty::List<LocalDefId>,
 
     /// Whether this inference context should care about region obligations in
     /// the root universe. Most notably, this is used during hir typeck as region
@@ -392,6 +391,10 @@ impl<'tcx> ty::InferCtxtLike for InferCtxt<'tcx> {
     fn probe_ct_var(&self, vid: ConstVid) -> Option<ty::Const<'tcx>> {
         self.probe_const_var(vid).ok()
     }
+
+    fn defining_opaque_types(&self) -> &'tcx ty::List<LocalDefId> {
+        self.defining_opaque_types
+    }
 }
 
 /// See the `error_reporting` module for more details.
@@ -474,7 +477,7 @@ pub enum SubregionOrigin<'tcx> {
 }
 
 // `SubregionOrigin` is used a lot. Make sure it doesn't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
 static_assert_size!(SubregionOrigin<'_>, 32);
 
 impl<'tcx> SubregionOrigin<'tcx> {
@@ -606,7 +609,7 @@ impl fmt::Display for FixupError {
 /// Used to configure inference contexts before their creation.
 pub struct InferCtxtBuilder<'tcx> {
     tcx: TyCtxt<'tcx>,
-    defining_use_anchor: DefiningAnchor<'tcx>,
+    defining_opaque_types: &'tcx ty::List<LocalDefId>,
     considering_regions: bool,
     skip_leak_check: bool,
     /// Whether we are in coherence mode.
@@ -621,7 +624,7 @@ impl<'tcx> TyCtxt<'tcx> {
     fn infer_ctxt(self) -> InferCtxtBuilder<'tcx> {
         InferCtxtBuilder {
             tcx: self,
-            defining_use_anchor: DefiningAnchor::Bind(ty::List::empty()),
+            defining_opaque_types: ty::List::empty(),
             considering_regions: true,
             skip_leak_check: false,
             intercrate: false,
@@ -637,8 +640,16 @@ impl<'tcx> InferCtxtBuilder<'tcx> {
     /// It is only meant to be called in two places, for typeck
     /// (via `Inherited::build`) and for the inference context used
     /// in mir borrowck.
-    pub fn with_opaque_type_inference(mut self, defining_use_anchor: DefiningAnchor<'tcx>) -> Self {
-        self.defining_use_anchor = defining_use_anchor;
+    pub fn with_opaque_type_inference(mut self, defining_anchor: LocalDefId) -> Self {
+        self.defining_opaque_types = self.tcx.opaque_types_defined_by(defining_anchor);
+        self
+    }
+
+    pub fn with_defining_opaque_types(
+        mut self,
+        defining_opaque_types: &'tcx ty::List<LocalDefId>,
+    ) -> Self {
+        self.defining_opaque_types = defining_opaque_types;
         self
     }
 
@@ -670,22 +681,22 @@ impl<'tcx> InferCtxtBuilder<'tcx> {
     /// the bound values in `C` to their instantiated values in `V`
     /// (in other words, `S(C) = V`).
     pub fn build_with_canonical<T>(
-        &mut self,
+        self,
         span: Span,
         canonical: &Canonical<'tcx, T>,
     ) -> (InferCtxt<'tcx>, T, CanonicalVarValues<'tcx>)
     where
         T: TypeFoldable<TyCtxt<'tcx>>,
     {
-        let infcx = self.build();
-        let (value, args) = infcx.instantiate_canonical_with_fresh_inference_vars(span, canonical);
+        let infcx = self.with_defining_opaque_types(canonical.defining_opaque_types).build();
+        let (value, args) = infcx.instantiate_canonical(span, canonical);
         (infcx, value, args)
     }
 
     pub fn build(&mut self) -> InferCtxt<'tcx> {
         let InferCtxtBuilder {
             tcx,
-            defining_use_anchor,
+            defining_opaque_types,
             considering_regions,
             skip_leak_check,
             intercrate,
@@ -693,7 +704,7 @@ impl<'tcx> InferCtxtBuilder<'tcx> {
         } = *self;
         InferCtxt {
             tcx,
-            defining_use_anchor,
+            defining_opaque_types,
             considering_regions,
             skip_leak_check,
             inner: RefCell::new(InferCtxtInner::new()),
@@ -834,7 +845,9 @@ impl<'tcx> InferCtxt<'tcx> {
     {
         let origin = &ObligationCause::dummy();
         self.probe(|_| {
-            self.at(origin, param_env).sub(DefineOpaqueTypes::No, expected, actual).is_ok()
+            // We're only answering whether there could be a subtyping relation, and with
+            // opaque types, "there could be one", via registering a hidden type.
+            self.at(origin, param_env).sub(DefineOpaqueTypes::Yes, expected, actual).is_ok()
         })
     }
 
@@ -843,7 +856,9 @@ impl<'tcx> InferCtxt<'tcx> {
         T: at::ToTrace<'tcx>,
     {
         let origin = &ObligationCause::dummy();
-        self.probe(|_| self.at(origin, param_env).eq(DefineOpaqueTypes::No, a, b).is_ok())
+        // We're only answering whether the types could be the same, and with
+        // opaque types, "they can be the same", via registering a hidden type.
+        self.probe(|_| self.at(origin, param_env).eq(DefineOpaqueTypes::Yes, a, b).is_ok())
     }
 
     #[instrument(skip(self), level = "debug")]
@@ -1215,6 +1230,12 @@ impl<'tcx> InferCtxt<'tcx> {
     #[instrument(level = "debug", skip(self), ret)]
     pub fn clone_opaque_types(&self) -> opaque_types::OpaqueTypeMap<'tcx> {
         self.inner.borrow().opaque_type_storage.opaque_types.clone()
+    }
+
+    #[inline(always)]
+    pub fn can_define_opaque_ty(&self, id: impl Into<DefId>) -> bool {
+        let Some(id) = id.into().as_local() else { return false };
+        self.defining_opaque_types.contains(&id)
     }
 
     pub fn ty_to_string(&self, t: Ty<'tcx>) -> String {

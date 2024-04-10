@@ -1,5 +1,5 @@
-use crate::clean::auto_trait::AutoTraitFinder;
-use crate::clean::blanket_impl::BlanketImplFinder;
+use crate::clean::auto_trait::synthesize_auto_trait_impls;
+use crate::clean::blanket_impl::synthesize_blanket_impls;
 use crate::clean::render_macro_matchers::render_macro_matcher;
 use crate::clean::{
     clean_doc_module, clean_middle_const, clean_middle_region, clean_middle_ty, inline, Crate,
@@ -251,15 +251,6 @@ pub(super) fn clean_middle_path<'tcx>(
     }
 }
 
-/// Remove the generic arguments from a path.
-pub(crate) fn strip_path_generics(mut path: Path) -> Path {
-    for ps in path.segments.iter_mut() {
-        ps.args = GenericArgs::AngleBracketed { args: Default::default(), bindings: ThinVec::new() }
-    }
-
-    path
-}
-
 pub(crate) fn qpath_to_string(p: &hir::QPath<'_>) -> String {
     let segments = match *p {
         hir::QPath::Resolved(_, path) => &path.segments,
@@ -329,6 +320,7 @@ pub(crate) fn name_from_pat(p: &hir::Pat<'_>) -> Symbol {
             elts.iter().map(|p| name_from_pat(p).to_string()).collect::<Vec<String>>().join(", ")
         ),
         PatKind::Box(p) => return name_from_pat(&*p),
+        PatKind::Deref(p) => format!("deref!({})", name_from_pat(&*p)),
         PatKind::Ref(p, _) => return name_from_pat(&*p),
         PatKind::Lit(..) => {
             warn!(
@@ -485,20 +477,20 @@ pub(crate) fn resolve_type(cx: &mut DocContext<'_>, path: Path) -> Type {
     }
 }
 
-pub(crate) fn get_auto_trait_and_blanket_impls(
+pub(crate) fn synthesize_auto_trait_and_blanket_impls(
     cx: &mut DocContext<'_>,
     item_def_id: DefId,
 ) -> impl Iterator<Item = Item> {
     let auto_impls = cx
         .sess()
         .prof
-        .generic_activity("get_auto_trait_impls")
-        .run(|| AutoTraitFinder::new(cx).get_auto_trait_impls(item_def_id));
+        .generic_activity("synthesize_auto_trait_impls")
+        .run(|| synthesize_auto_trait_impls(cx, item_def_id));
     let blanket_impls = cx
         .sess()
         .prof
-        .generic_activity("get_blanket_impls")
-        .run(|| BlanketImplFinder { cx }.get_blanket_impls(item_def_id));
+        .generic_activity("synthesize_blanket_impls")
+        .run(|| synthesize_blanket_impls(cx, item_def_id));
     auto_impls.into_iter().chain(blanket_impls)
 }
 

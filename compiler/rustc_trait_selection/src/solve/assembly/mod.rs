@@ -215,6 +215,13 @@ pub(super) trait GoalKind<'tcx>:
         goal: Goal<'tcx, Self>,
     ) -> QueryResult<'tcx>;
 
+    /// A coroutine (that comes from a `gen` desugaring) is known to implement
+    /// `FusedIterator`
+    fn consider_builtin_fused_iterator_candidate(
+        ecx: &mut EvalCtxt<'_, 'tcx>,
+        goal: Goal<'tcx, Self>,
+    ) -> QueryResult<'tcx>;
+
     fn consider_builtin_async_iterator_candidate(
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
@@ -305,11 +312,18 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
     fn forced_ambiguity(&mut self, cause: MaybeCause) -> Vec<Candidate<'tcx>> {
         let source = CandidateSource::BuiltinImpl(BuiltinImplSource::Misc);
         let certainty = Certainty::Maybe(cause);
-        let result = self.evaluate_added_goals_and_make_canonical_response(certainty).unwrap();
+        // This may fail if `try_evaluate_added_goals` overflows because it
+        // fails to reach a fixpoint but ends up getting an error after
+        // running for some additional step.
+        //
+        // FIXME: Add a test for this. It seems to be necessary for typenum but
+        // is incredibly hard to minimize as it may rely on being inside of a
+        // trait solver cycle.
+        let result = self.evaluate_added_goals_and_make_canonical_response(certainty);
         let mut dummy_probe = self.inspect.new_probe();
-        dummy_probe.probe_kind(ProbeKind::TraitCandidate { source, result: Ok(result) });
+        dummy_probe.probe_kind(ProbeKind::TraitCandidate { source, result });
         self.inspect.finish_probe(dummy_probe);
-        vec![Candidate { source, result }]
+        if let Ok(result) = result { vec![Candidate { source, result }] } else { vec![] }
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -349,8 +363,9 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
             | ty::Foreign(_)
             | ty::Str
             | ty::Array(_, _)
+            | ty::Pat(_, _)
             | ty::Slice(_)
-            | ty::RawPtr(_)
+            | ty::RawPtr(_, _)
             | ty::Ref(_, _, _)
             | ty::FnDef(_, _)
             | ty::FnPtr(_)
@@ -497,6 +512,8 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
             G::consider_builtin_future_candidate(self, goal)
         } else if lang_items.iterator_trait() == Some(trait_def_id) {
             G::consider_builtin_iterator_candidate(self, goal)
+        } else if lang_items.fused_iterator_trait() == Some(trait_def_id) {
+            G::consider_builtin_fused_iterator_candidate(self, goal)
         } else if lang_items.async_iterator_trait() == Some(trait_def_id) {
             G::consider_builtin_async_iterator_candidate(self, goal)
         } else if lang_items.coroutine_trait() == Some(trait_def_id) {
@@ -580,8 +597,9 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
             | ty::Foreign(_)
             | ty::Str
             | ty::Array(_, _)
+            | ty::Pat(_, _)
             | ty::Slice(_)
-            | ty::RawPtr(_)
+            | ty::RawPtr(_, _)
             | ty::Ref(_, _, _)
             | ty::FnDef(_, _)
             | ty::FnPtr(_)
@@ -668,8 +686,9 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
             | ty::Foreign(_)
             | ty::Str
             | ty::Array(_, _)
+            | ty::Pat(_, _)
             | ty::Slice(_)
-            | ty::RawPtr(_)
+            | ty::RawPtr(_, _)
             | ty::Ref(_, _, _)
             | ty::FnDef(_, _)
             | ty::FnPtr(_)

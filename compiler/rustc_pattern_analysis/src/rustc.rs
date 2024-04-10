@@ -186,7 +186,6 @@ impl<'p, 'tcx: 'p> RustcPatCtxt<'p, 'tcx> {
 
     /// Returns the types of the fields for a given constructor. The result must have a length of
     /// `ctor.arity()`.
-    #[instrument(level = "trace", skip(self))]
     pub(crate) fn ctor_sub_tys<'a>(
         &'a self,
         ctor: &'a Constructor<'p, 'tcx>,
@@ -283,7 +282,6 @@ impl<'p, 'tcx: 'p> RustcPatCtxt<'p, 'tcx> {
     /// Creates a set that represents all the constructors of `ty`.
     ///
     /// See [`crate::constructor`] for considerations of emptiness.
-    #[instrument(level = "debug", skip(self), ret)]
     pub fn ctors_for_ty(
         &self,
         ty: RevealedTy<'tcx>,
@@ -398,9 +396,10 @@ impl<'p, 'tcx: 'p> RustcPatCtxt<'p, 'tcx> {
             ty::Float(_)
             | ty::Str
             | ty::Foreign(_)
-            | ty::RawPtr(_)
+            | ty::RawPtr(_, _)
             | ty::FnDef(_, _)
             | ty::FnPtr(_)
+            | ty::Pat(_, _)
             | ty::Dynamic(_, _, _)
             | ty::Closure(..)
             | ty::CoroutineClosure(..)
@@ -461,6 +460,12 @@ impl<'p, 'tcx: 'p> RustcPatCtxt<'p, 'tcx> {
                     ty::Ref(..) => Ref,
                     _ => bug!("pattern has unexpected type: pat: {:?}, ty: {:?}", pat, ty),
                 };
+            }
+            PatKind::DerefPattern { .. } => {
+                // FIXME(deref_patterns): At least detect that `box _` is irrefutable.
+                fields = vec![];
+                arity = 0;
+                ctor = Opaque(OpaqueId::new());
             }
             PatKind::Leaf { subpatterns } | PatKind::Variant { subpatterns, .. } => {
                 match ty.kind() {
@@ -874,13 +879,14 @@ impl<'p, 'tcx: 'p> PatCx for RustcPatCtxt<'p, 'tcx> {
 
     fn write_variant_name(
         f: &mut fmt::Formatter<'_>,
-        pat: &crate::pat::DeconstructedPat<Self>,
+        ctor: &crate::constructor::Constructor<Self>,
+        ty: &Self::Ty,
     ) -> fmt::Result {
-        if let ty::Adt(adt, _) = pat.ty().kind() {
+        if let ty::Adt(adt, _) = ty.kind() {
             if adt.is_box() {
                 write!(f, "Box")?
             } else {
-                let variant = adt.variant(Self::variant_index_for_adt(pat.ctor(), *adt));
+                let variant = adt.variant(Self::variant_index_for_adt(ctor, *adt));
                 write!(f, "{}", variant.name)?;
             }
         }

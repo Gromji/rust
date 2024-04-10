@@ -57,10 +57,7 @@
 //
 // This cfg won't affect doc tests.
 #![cfg(not(test))]
-// To run core tests without x.py without ending up with two copies of core, Miri needs to be
-// able to "empty" this crate. See <https://github.com/rust-lang/miri-test-libstd/issues/4>.
-// rustc itself never sets the feature, so this line has no effect there.
-#![cfg(any(not(feature = "miri-test-libstd"), test, doctest))]
+//
 #![stable(feature = "core", since = "1.6.0")]
 #![doc(
     html_playground_url = "https://play.rust-lang.org/",
@@ -71,7 +68,6 @@
 #![doc(rust_logo)]
 #![doc(cfg_hide(
     not(test),
-    any(not(feature = "miri-test-libstd"), test, doctest),
     no_fp_fmt_parse,
     target_pointer_width = "16",
     target_pointer_width = "32",
@@ -94,6 +90,7 @@
 ))]
 #![no_core]
 #![rustc_coherence_is_core]
+#![cfg_attr(not(bootstrap), rustc_preserve_ub_checks)]
 //
 // Lints:
 #![deny(rust_2021_incompatible_or_patterns)]
@@ -112,6 +109,7 @@
 //
 // Library features:
 // tidy-alphabetical-start
+#![cfg_attr(bootstrap, feature(associated_type_bounds))]
 #![feature(array_ptr_get)]
 #![feature(char_indices_offset)]
 #![feature(const_align_of_val)]
@@ -123,7 +121,6 @@
 #![feature(const_array_into_iter_constructors)]
 #![feature(const_bigint_helper_methods)]
 #![feature(const_black_box)]
-#![feature(const_caller_location)]
 #![feature(const_cell_into_inner)]
 #![feature(const_char_from_u32_unchecked)]
 #![feature(const_eval_select)]
@@ -135,7 +132,7 @@
 #![feature(const_heap)]
 #![feature(const_hint_assert_unchecked)]
 #![feature(const_index_range_slice_index)]
-#![feature(const_int_unchecked_arith)]
+#![feature(const_int_from_str)]
 #![feature(const_intrinsic_copy)]
 #![feature(const_intrinsic_forget)]
 #![feature(const_ipv4)]
@@ -169,6 +166,8 @@
 #![feature(const_try)]
 #![feature(const_type_id)]
 #![feature(const_type_name)]
+#![feature(const_typed_swap)]
+#![feature(const_ub_checks)]
 #![feature(const_unicode_case_lookup)]
 #![feature(const_unsafecell_get_mut)]
 #![feature(const_waker)]
@@ -188,13 +187,11 @@
 #![feature(ptr_metadata)]
 #![feature(set_ptr_value)]
 #![feature(slice_ptr_get)]
-#![feature(slice_split_at_unchecked)]
 #![feature(split_at_checked)]
 #![feature(str_internals)]
 #![feature(str_split_inclusive_remainder)]
 #![feature(str_split_remainder)]
 #![feature(strict_provenance)]
-#![feature(unchecked_math)]
 #![feature(unchecked_shifts)]
 #![feature(utf16_extra)]
 #![feature(utf16_extra_const)]
@@ -203,12 +200,8 @@
 //
 // Language features:
 // tidy-alphabetical-start
-#![cfg_attr(bootstrap, feature(associated_type_bounds))]
-#![cfg_attr(bootstrap, feature(diagnostic_namespace))]
-#![cfg_attr(bootstrap, feature(exhaustive_patterns))]
-#![cfg_attr(bootstrap, feature(platform_intrinsics))]
-#![cfg_attr(not(bootstrap), feature(freeze_impls))]
-#![cfg_attr(not(bootstrap), feature(min_exhaustive_patterns))]
+#![cfg_attr(not(bootstrap), feature(f128))]
+#![cfg_attr(not(bootstrap), feature(f16))]
 #![feature(abi_unadjusted)]
 #![feature(adt_const_params)]
 #![feature(allow_internal_unsafe)]
@@ -233,6 +226,7 @@
 #![feature(doc_notable_trait)]
 #![feature(effects)]
 #![feature(extern_types)]
+#![feature(freeze_impls)]
 #![feature(fundamental)]
 #![feature(generic_arg_infer)]
 #![feature(if_let_guard)]
@@ -243,6 +237,7 @@
 #![feature(let_chains)]
 #![feature(link_llvm_intrinsics)]
 #![feature(macro_metavar_expr)]
+#![feature(min_exhaustive_patterns)]
 #![feature(min_specialization)]
 #![feature(multiple_supertrait_upcastable)]
 #![feature(must_not_suspend)]
@@ -272,6 +267,7 @@
 #![feature(arm_target_feature)]
 #![feature(avx512_target_feature)]
 #![feature(hexagon_target_feature)]
+#![feature(loongarch_target_feature)]
 #![feature(mips_target_feature)]
 #![feature(powerpc_target_feature)]
 #![feature(riscv_target_feature)]
@@ -287,7 +283,7 @@ extern crate self as core;
 
 #[prelude_import]
 #[allow(unused)]
-use prelude::v1::*;
+use prelude::rust_2021::*;
 
 #[cfg(not(test))] // See #65860
 #[macro_use]
@@ -369,6 +365,7 @@ pub mod hint;
 pub mod intrinsics;
 pub mod mem;
 pub mod ptr;
+mod ub_checks;
 
 /* Core language traits */
 
@@ -399,6 +396,9 @@ pub mod net;
 pub mod option;
 pub mod panic;
 pub mod panicking;
+#[cfg(not(bootstrap))]
+#[unstable(feature = "core_pattern_types", issue = "none")]
+pub mod pat;
 pub mod pin;
 pub mod result;
 pub mod sync;

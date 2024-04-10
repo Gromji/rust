@@ -33,10 +33,6 @@ rustc_index::newtype_index! {
     pub struct CounterId {}
 }
 
-impl CounterId {
-    pub const START: Self = Self::from_u32(0);
-}
-
 rustc_index::newtype_index! {
     /// ID of a coverage-counter expression. Values ascend from 0.
     ///
@@ -53,10 +49,6 @@ rustc_index::newtype_index! {
     #[max = 0xFFFF_FFFF]
     #[debug_format = "ExpressionId({})"]
     pub struct ExpressionId {}
-}
-
-impl ExpressionId {
-    pub const START: Self = Self::from_u32(0);
 }
 
 /// Enum that can hold a constant zero value, the ID of an physical coverage
@@ -88,14 +80,13 @@ pub enum CoverageKind {
     /// Marks a span that might otherwise not be represented in MIR, so that
     /// coverage instrumentation can associate it with its enclosing block/BCB.
     ///
-    /// Only used by the `InstrumentCoverage` pass, and has no effect during
-    /// codegen.
+    /// Should be erased before codegen (at some point after `InstrumentCoverage`).
     SpanMarker,
 
     /// Marks its enclosing basic block with an ID that can be referred to by
     /// side data in [`BranchInfo`].
     ///
-    /// Has no effect during codegen.
+    /// Should be erased before codegen (at some point after `InstrumentCoverage`).
     BlockMarker { id: BlockMarkerId },
 
     /// Marks the point in MIR control flow represented by a coverage counter.

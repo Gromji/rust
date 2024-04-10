@@ -245,6 +245,11 @@ impl<'tcx> TyCtxt<'tcx> {
 
                 ty::Tuple(_) => break,
 
+                ty::Pat(inner, _) => {
+                    f();
+                    ty = inner;
+                }
+
                 ty::Alias(..) => {
                     let normalized = normalize(ty);
                     if ty == normalized {
@@ -682,6 +687,9 @@ impl<'tcx> TyCtxt<'tcx> {
 
     /// Return the set of types that should be taken into account when checking
     /// trait bounds on a coroutine's internal state.
+    // FIXME(compiler-errors): We should remove this when the old solver goes away;
+    // and all other usages of this function should go through `bound_coroutine_hidden_types`
+    // instead.
     pub fn coroutine_hidden_types(
         self,
         def_id: DefId,
@@ -692,6 +700,33 @@ impl<'tcx> TyCtxt<'tcx> {
             .map_or_else(|| [].iter(), |l| l.field_tys.iter())
             .filter(|decl| !decl.ignore_for_traits)
             .map(|decl| ty::EarlyBinder::bind(decl.ty))
+    }
+
+    /// Return the set of types that should be taken into account when checking
+    /// trait bounds on a coroutine's internal state. This properly replaces
+    /// `ReErased` with new existential bound lifetimes.
+    pub fn bound_coroutine_hidden_types(
+        self,
+        def_id: DefId,
+    ) -> impl Iterator<Item = ty::EarlyBinder<ty::Binder<'tcx, Ty<'tcx>>>> {
+        let coroutine_layout = self.mir_coroutine_witnesses(def_id);
+        coroutine_layout
+            .as_ref()
+            .map_or_else(|| [].iter(), |l| l.field_tys.iter())
+            .filter(|decl| !decl.ignore_for_traits)
+            .map(move |decl| {
+                let mut vars = vec![];
+                let ty = self.fold_regions(decl.ty, |re, debruijn| {
+                    assert_eq!(re, self.lifetimes.re_erased);
+                    let var = ty::BoundVar::from_usize(vars.len());
+                    vars.push(ty::BoundVariableKind::Region(ty::BrAnon));
+                    ty::Region::new_bound(self, debruijn, ty::BoundRegion { var, kind: ty::BrAnon })
+                });
+                ty::EarlyBinder::bind(ty::Binder::bind_with_vars(
+                    ty,
+                    self.mk_bound_variable_kinds(&vars),
+                ))
+            })
     }
 
     /// Expands the given impl trait type, stopping if the type is recursive.
@@ -998,8 +1033,10 @@ impl<'tcx> OpaqueTypeExpander<'tcx> {
                 Some(expanded_ty) => *expanded_ty,
                 None => {
                     if matches!(self.inspect_coroutine_fields, InspectCoroutineFields::Yes) {
-                        for bty in self.tcx.coroutine_hidden_types(def_id) {
-                            let hidden_ty = bty.instantiate(self.tcx, args);
+                        for bty in self.tcx.bound_coroutine_hidden_types(def_id) {
+                            let hidden_ty = self.tcx.instantiate_bound_regions_with_erased(
+                                bty.instantiate(self.tcx, args),
+                            );
                             self.fold_ty(hidden_ty);
                         }
                     }
@@ -1205,12 +1242,12 @@ impl<'tcx> Ty<'tcx> {
             | ty::Str
             | ty::Never
             | ty::Ref(..)
-            | ty::RawPtr(_)
+            | ty::RawPtr(_, _)
             | ty::FnDef(..)
             | ty::Error(_)
             | ty::FnPtr(_) => true,
             ty::Tuple(fields) => fields.iter().all(Self::is_trivially_freeze),
-            ty::Slice(elem_ty) | ty::Array(elem_ty, _) => elem_ty.is_trivially_freeze(),
+            ty::Pat(ty, _) | ty::Slice(ty) | ty::Array(ty, _) => ty.is_trivially_freeze(),
             ty::Adt(..)
             | ty::Bound(..)
             | ty::Closure(..)
@@ -1245,12 +1282,12 @@ impl<'tcx> Ty<'tcx> {
             | ty::Str
             | ty::Never
             | ty::Ref(..)
-            | ty::RawPtr(_)
+            | ty::RawPtr(_, _)
             | ty::FnDef(..)
             | ty::Error(_)
             | ty::FnPtr(_) => true,
             ty::Tuple(fields) => fields.iter().all(Self::is_trivially_unpin),
-            ty::Slice(elem_ty) | ty::Array(elem_ty, _) => elem_ty.is_trivially_unpin(),
+            ty::Pat(ty, _) | ty::Slice(ty) | ty::Array(ty, _) => ty.is_trivially_unpin(),
             ty::Adt(..)
             | ty::Bound(..)
             | ty::Closure(..)
@@ -1366,10 +1403,10 @@ impl<'tcx> Ty<'tcx> {
             //
             // Because this function is "shallow", we return `true` for these composites regardless
             // of the type(s) contained within.
-            ty::Ref(..) | ty::Array(..) | ty::Slice(_) | ty::Tuple(..) => true,
+            ty::Pat(..) | ty::Ref(..) | ty::Array(..) | ty::Slice(_) | ty::Tuple(..) => true,
 
             // Raw pointers use bitwise comparison.
-            ty::RawPtr(_) | ty::FnPtr(_) => true,
+            ty::RawPtr(_, _) | ty::FnPtr(_) => true,
 
             // Floating point numbers are not `Eq`.
             ty::Float(_) => false,
@@ -1462,7 +1499,7 @@ impl<'tcx> ExplicitSelf<'tcx> {
         match *self_arg_ty.kind() {
             _ if is_self_ty(self_arg_ty) => ByValue,
             ty::Ref(region, ty, mutbl) if is_self_ty(ty) => ByReference(region, mutbl),
-            ty::RawPtr(ty::TypeAndMut { ty, mutbl }) if is_self_ty(ty) => ByRawPointer(mutbl),
+            ty::RawPtr(ty, mutbl) if is_self_ty(ty) => ByRawPointer(mutbl),
             ty::Adt(def, _) if def.is_box() && is_self_ty(self_arg_ty.boxed_ty()) => ByBox,
             _ => Other,
         }
@@ -1487,7 +1524,7 @@ pub fn needs_drop_components<'tcx>(
         | ty::FnDef(..)
         | ty::FnPtr(_)
         | ty::Char
-        | ty::RawPtr(_)
+        | ty::RawPtr(_, _)
         | ty::Ref(..)
         | ty::Str => Ok(SmallVec::new()),
 
@@ -1496,7 +1533,7 @@ pub fn needs_drop_components<'tcx>(
 
         ty::Dynamic(..) | ty::Error(_) => Err(AlwaysRequiresDrop),
 
-        ty::Slice(ty) => needs_drop_components(tcx, ty),
+        ty::Pat(ty, _) | ty::Slice(ty) => needs_drop_components(tcx, ty),
         ty::Array(elem_ty, size) => {
             match needs_drop_components(tcx, elem_ty) {
                 Ok(v) if v.is_empty() => Ok(v),
@@ -1542,7 +1579,7 @@ pub fn is_trivially_const_drop(ty: Ty<'_>) -> bool {
         | ty::Infer(ty::IntVar(_))
         | ty::Infer(ty::FloatVar(_))
         | ty::Str
-        | ty::RawPtr(_)
+        | ty::RawPtr(_, _)
         | ty::Ref(..)
         | ty::FnDef(..)
         | ty::FnPtr(_)
@@ -1565,7 +1602,7 @@ pub fn is_trivially_const_drop(ty: Ty<'_>) -> bool {
         | ty::CoroutineWitness(..)
         | ty::Adt(..) => false,
 
-        ty::Array(ty, _) | ty::Slice(ty) => is_trivially_const_drop(ty),
+        ty::Array(ty, _) | ty::Slice(ty) | ty::Pat(ty, _) => is_trivially_const_drop(ty),
 
         ty::Tuple(tys) => tys.iter().all(|ty| is_trivially_const_drop(ty)),
     }
@@ -1576,16 +1613,18 @@ pub fn is_trivially_const_drop(ty: Ty<'_>) -> bool {
 /// let v = self.iter().map(|p| p.fold_with(folder)).collect::<SmallVec<[_; 8]>>();
 /// folder.tcx().intern_*(&v)
 /// ```
-pub fn fold_list<'tcx, F, T>(
-    list: &'tcx ty::List<T>,
+pub fn fold_list<'tcx, F, L, T>(
+    list: L,
     folder: &mut F,
-    intern: impl FnOnce(TyCtxt<'tcx>, &[T]) -> &'tcx ty::List<T>,
-) -> Result<&'tcx ty::List<T>, F::Error>
+    intern: impl FnOnce(TyCtxt<'tcx>, &[T]) -> L,
+) -> Result<L, F::Error>
 where
     F: FallibleTypeFolder<TyCtxt<'tcx>>,
+    L: AsRef<[T]>,
     T: TypeFoldable<TyCtxt<'tcx>> + PartialEq + Copy,
 {
-    let mut iter = list.iter();
+    let slice = list.as_ref();
+    let mut iter = slice.iter().copied();
     // Look for the first element that changed
     match iter.by_ref().enumerate().find_map(|(i, t)| match t.try_fold_with(folder) {
         Ok(new_t) if new_t == t => None,
@@ -1593,8 +1632,8 @@ where
     }) {
         Some((i, Ok(new_t))) => {
             // An element changed, prepare to intern the resulting list
-            let mut new_list = SmallVec::<[_; 8]>::with_capacity(list.len());
-            new_list.extend_from_slice(&list[..i]);
+            let mut new_list = SmallVec::<[_; 8]>::with_capacity(slice.len());
+            new_list.extend_from_slice(&slice[..i]);
             new_list.push(new_t);
             for t in iter {
                 new_list.push(t.try_fold_with(folder)?)
@@ -1615,8 +1654,8 @@ pub struct AlwaysRequiresDrop;
 /// with their underlying types.
 pub fn reveal_opaque_types_in_bounds<'tcx>(
     tcx: TyCtxt<'tcx>,
-    val: &'tcx ty::List<ty::Clause<'tcx>>,
-) -> &'tcx ty::List<ty::Clause<'tcx>> {
+    val: ty::Clauses<'tcx>,
+) -> ty::Clauses<'tcx> {
     let mut visitor = OpaqueTypeExpander {
         seen_opaque_tys: FxHashSet::default(),
         expanded_cache: FxHashMap::default(),

@@ -571,7 +571,9 @@ pub fn make_tests(
         &modified_tests,
         &mut poisoned,
     )
-    .unwrap_or_else(|_| panic!("Could not read tests from {}", config.src_base.display()));
+    .unwrap_or_else(|reason| {
+        panic!("Could not read tests from {}: {reason}", config.src_base.display())
+    });
 
     if poisoned {
         eprintln!();
@@ -608,6 +610,8 @@ fn common_inputs_stamp(config: &Config) -> Stamp {
         stamp.add_path(&rustdoc_path);
         stamp.add_path(&rust_src_dir.join("src/etc/htmldocck.py"));
     }
+
+    stamp.add_dir(&rust_src_dir.join("src/tools/run-make-support"));
 
     // Compiletest itself.
     stamp.add_dir(&rust_src_dir.join("src/tools/compiletest/"));

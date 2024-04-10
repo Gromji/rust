@@ -92,8 +92,9 @@ const EXTRA_CHECK_CFGS: &[(Option<Mode>, &str, Option<&[&'static str]>)] = &[
     (Some(Mode::Std), "backtrace_in_libstd", None),
     /* Extra values not defined in the built-in targets yet, but used in std */
     (Some(Mode::Std), "target_env", Some(&["libnx", "p2"])),
-    // (Some(Mode::Std), "target_os", Some(&[])),
+    (Some(Mode::Std), "target_os", Some(&["visionos"])),
     (Some(Mode::Std), "target_arch", Some(&["arm64ec", "spirv", "nvptx", "xtensa"])),
+    (Some(Mode::ToolStd), "target_os", Some(&["visionos"])),
     /* Extra names used by dependencies */
     // FIXME: Used by serde_json, but we should not be triggering on external dependencies.
     (Some(Mode::Rustc), "no_btreemap_remove_entry", None),
@@ -250,6 +251,8 @@ pub enum Mode {
     /// directory. This is for miscellaneous sets of tools that are built
     /// using the bootstrap stage0 compiler in its entirety (target libraries
     /// and all). Typically these tools compile with stable Rust.
+    ///
+    /// Only works for stage 0.
     ToolBootstrap,
 
     /// Build a tool which uses the locally built std, placing output in the
@@ -1009,15 +1012,23 @@ impl Build {
         let result = if !output.status.success() {
             if print_error {
                 println!(
-                    "\n\ncommand did not execute successfully: {:?}\n\
-                    expected success, got: {}\n\n\
-                    stdout ----\n{}\n\
-                    stderr ----\n{}\n\n",
-                    command.command,
+                    "\n\nCommand did not execute successfully.\
+                    \nExpected success, got: {}",
                     output.status,
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
                 );
+
+                if !self.is_verbose() {
+                    println!("Add `-v` to see more details.\n");
+                }
+
+                self.verbose(|| {
+                    println!(
+                        "\nSTDOUT ----\n{}\n\
+                        STDERR ----\n{}\n",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    )
+                });
             }
             Err(())
         } else {
@@ -1389,6 +1400,13 @@ impl Build {
         if let Some(path) = finder.maybe_have("wasmtime") {
             if let Ok(mut path) = path.into_os_string().into_string() {
                 path.push_str(" run -C cache=n --dir .");
+                // Make sure that tests have access to RUSTC_BOOTSTRAP. This (for example) is
+                // required for libtest to work on beta/stable channels.
+                //
+                // NB: with Wasmtime 20 this can change to `-S inherit-env` to
+                // inherit the entire environment rather than just this single
+                // environment variable.
+                path.push_str(" --env RUSTC_BOOTSTRAP");
                 return Some(path);
             }
         }
@@ -1892,15 +1910,6 @@ impl Compiler {
     /// Returns `true` if this is a snapshot compiler for `build`'s configuration
     pub fn is_snapshot(&self, build: &Build) -> bool {
         self.stage == 0 && self.host == build.build
-    }
-
-    /// Returns if this compiler should be treated as a final stage one in the
-    /// current build session.
-    /// This takes into account whether we're performing a full bootstrap or
-    /// not; don't directly compare the stage with `2`!
-    pub fn is_final_stage(&self, build: &Build) -> bool {
-        let final_stage = if build.config.full_bootstrap { 2 } else { 1 };
-        self.stage >= final_stage
     }
 }
 

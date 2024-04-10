@@ -9,7 +9,6 @@ use crate::sys::handle::Handle;
 use crate::sys::stack_overflow;
 use crate::sys_common::FromInner;
 use crate::time::Duration;
-use alloc::ffi::CString;
 use core::ffi::c_void;
 
 use super::time::WaitableTimer;
@@ -48,9 +47,8 @@ impl Thread {
 
         extern "system" fn thread_start(main: *mut c_void) -> c::DWORD {
             unsafe {
-                // Next, set up our stack overflow handler which may get triggered if we run
-                // out of stack.
-                let _handler = stack_overflow::Handler::new();
+                // Next, reserve some stack space for if we otherwise run out of stack.
+                stack_overflow::reserve_stack();
                 // Finally, let's run some code.
                 Box::from_raw(main as *mut Box<dyn FnOnce()>)();
             }
@@ -66,29 +64,6 @@ impl Thread {
                 };
             };
         };
-    }
-
-    pub fn get_name() -> Option<CString> {
-        unsafe {
-            let mut ptr = core::ptr::null_mut();
-            let result = c::GetThreadDescription(c::GetCurrentThread(), &mut ptr);
-            if result < 0 {
-                return None;
-            }
-            let name = String::from_utf16_lossy({
-                let mut len = 0;
-                while *ptr.add(len) != 0 {
-                    len += 1;
-                }
-                core::slice::from_raw_parts(ptr, len)
-            })
-            .into_bytes();
-            // Attempt to free the memory.
-            // This should never fail but if it does then there's not much we can do about it.
-            let result = c::LocalFree(ptr.cast::<c_void>());
-            debug_assert!(result.is_null());
-            if name.is_empty() { None } else { Some(CString::from_vec_unchecked(name)) }
-        }
     }
 
     pub fn join(self) {
@@ -142,16 +117,5 @@ pub fn available_parallelism() -> io::Result<NonZero<usize>> {
             "The number of hardware threads is not known for the target platform",
         )),
         cpus => Ok(unsafe { NonZero::new_unchecked(cpus) }),
-    }
-}
-
-#[cfg_attr(test, allow(dead_code))]
-pub mod guard {
-    pub type Guard = !;
-    pub unsafe fn current() -> Option<Guard> {
-        None
-    }
-    pub unsafe fn init() -> Option<Guard> {
-        None
     }
 }

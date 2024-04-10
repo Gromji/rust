@@ -602,6 +602,7 @@ The minimum rust version that the project supports. Defaults to the `rust-versio
 **Affected lints:**
 * [`almost_complete_range`](https://rust-lang.github.io/rust-clippy/master/index.html#almost_complete_range)
 * [`approx_constant`](https://rust-lang.github.io/rust-clippy/master/index.html#approx_constant)
+* [`assigning_clones`](https://rust-lang.github.io/rust-clippy/master/index.html#assigning_clones)
 * [`borrow_as_ptr`](https://rust-lang.github.io/rust-clippy/master/index.html#borrow_as_ptr)
 * [`cast_abs_to_unsigned`](https://rust-lang.github.io/rust-clippy/master/index.html#cast_abs_to_unsigned)
 * [`checked_conversions`](https://rust-lang.github.io/rust-clippy/master/index.html#checked_conversions)
@@ -615,6 +616,7 @@ The minimum rust version that the project supports. Defaults to the `rust-versio
 * [`if_then_some_else_none`](https://rust-lang.github.io/rust-clippy/master/index.html#if_then_some_else_none)
 * [`index_refutable_slice`](https://rust-lang.github.io/rust-clippy/master/index.html#index_refutable_slice)
 * [`iter_kv_map`](https://rust-lang.github.io/rust-clippy/master/index.html#iter_kv_map)
+* [`legacy_numeric_constants`](https://rust-lang.github.io/rust-clippy/master/index.html#legacy_numeric_constants)
 * [`manual_bits`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_bits)
 * [`manual_c_str_literals`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_c_str_literals)
 * [`manual_clamp`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_clamp)

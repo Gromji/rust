@@ -51,6 +51,7 @@ const READ_LIMIT: usize = libc::ssize_t::MAX as usize;
     target_os = "netbsd",
     target_os = "openbsd",
     target_os = "watchos",
+    target_os = "visionos",
 ))]
 const fn max_iov() -> usize {
     libc::IOV_MAX as usize
@@ -81,6 +82,7 @@ const fn max_iov() -> usize {
     target_os = "horizon",
     target_os = "vita",
     target_os = "watchos",
+    target_os = "visionos",
 )))]
 const fn max_iov() -> usize {
     16 // The minimum value required by POSIX.
@@ -167,6 +169,8 @@ impl FileDesc {
     }
 
     #[cfg(any(
+        target_os = "aix",
+        target_os = "dragonfly", // DragonFly 1.5
         target_os = "emscripten",
         target_os = "freebsd",
         target_os = "fuchsia",
@@ -174,6 +178,7 @@ impl FileDesc {
         target_os = "illumos",
         target_os = "linux",
         target_os = "netbsd",
+        target_os = "openbsd", // OpenBSD 2.7
     ))]
     pub fn read_vectored_at(&self, bufs: &mut [IoSliceMut<'_>], offset: u64) -> io::Result<usize> {
         let ret = cvt(unsafe {
@@ -188,7 +193,9 @@ impl FileDesc {
     }
 
     #[cfg(not(any(
+        target_os = "aix",
         target_os = "android",
+        target_os = "dragonfly",
         target_os = "emscripten",
         target_os = "freebsd",
         target_os = "fuchsia",
@@ -199,6 +206,8 @@ impl FileDesc {
         target_os = "linux",
         target_os = "macos",
         target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "watchos",
     )))]
     pub fn read_vectored_at(&self, bufs: &mut [IoSliceMut<'_>], offset: u64) -> io::Result<usize> {
         io::default_read_vectored(|b| self.read_at(b, offset), bufs)
@@ -236,9 +245,10 @@ impl FileDesc {
     // no `syscall` possible in these platform.
     #[cfg(any(
         all(target_os = "android", target_pointer_width = "32"),
-        target_os = "ios",
-        target_os = "tvos",
-        target_os = "macos",
+        target_os = "ios", // ios 14.0
+        target_os = "tvos", // tvos 14.0
+        target_os = "macos", // macos 11.0
+        target_os = "watchos", // watchos 7.0
     ))]
     pub fn read_vectored_at(&self, bufs: &mut [IoSliceMut<'_>], offset: u64) -> io::Result<usize> {
         super::weak::weak!(fn preadv64(libc::c_int, *const libc::iovec, libc::c_int, off64_t) -> isize);
@@ -318,6 +328,8 @@ impl FileDesc {
     }
 
     #[cfg(any(
+        target_os = "aix",
+        target_os = "dragonfly", // DragonFly 1.5
         target_os = "emscripten",
         target_os = "freebsd",
         target_os = "fuchsia",
@@ -325,6 +337,7 @@ impl FileDesc {
         target_os = "illumos",
         target_os = "linux",
         target_os = "netbsd",
+        target_os = "openbsd", // OpenBSD 2.7
     ))]
     pub fn write_vectored_at(&self, bufs: &[IoSlice<'_>], offset: u64) -> io::Result<usize> {
         let ret = cvt(unsafe {
@@ -339,7 +352,9 @@ impl FileDesc {
     }
 
     #[cfg(not(any(
+        target_os = "aix",
         target_os = "android",
+        target_os = "dragonfly",
         target_os = "emscripten",
         target_os = "freebsd",
         target_os = "fuchsia",
@@ -350,6 +365,8 @@ impl FileDesc {
         target_os = "linux",
         target_os = "macos",
         target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "watchos",
     )))]
     pub fn write_vectored_at(&self, bufs: &[IoSlice<'_>], offset: u64) -> io::Result<usize> {
         io::default_write_vectored(|b| self.write_at(b, offset), bufs)
@@ -387,9 +404,10 @@ impl FileDesc {
     // no `syscall` possible in these platform.
     #[cfg(any(
         all(target_os = "android", target_pointer_width = "32"),
-        target_os = "ios",
-        target_os = "tvos",
-        target_os = "macos",
+        target_os = "ios", // ios 14.0
+        target_os = "tvos", // tvos 14.0
+        target_os = "macos", // macos 11.0
+        target_os = "watchos", // watchos 7.0
     ))]
     pub fn write_vectored_at(&self, bufs: &[IoSlice<'_>], offset: u64) -> io::Result<usize> {
         super::weak::weak!(fn pwritev64(libc::c_int, *const libc::iovec, libc::c_int, off64_t) -> isize);

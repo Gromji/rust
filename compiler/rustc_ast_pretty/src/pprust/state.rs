@@ -1188,6 +1188,11 @@ impl<'a> State<'a> {
             ast::TyKind::CVarArgs => {
                 self.word("...");
             }
+            ast::TyKind::Pat(ty, pat) => {
+                self.print_type(ty);
+                self.word(" is ");
+                self.print_pat(pat);
+            }
         }
         self.end();
     }
@@ -1545,11 +1550,14 @@ impl<'a> State<'a> {
             PatKind::Wild => self.word("_"),
             PatKind::Never => self.word("!"),
             PatKind::Ident(BindingAnnotation(by_ref, mutbl), ident, sub) => {
-                if *by_ref == ByRef::Yes {
-                    self.word_nbsp("ref");
-                }
                 if mutbl.is_mut() {
                     self.word_nbsp("mut");
+                }
+                if let ByRef::Yes(rmutbl) = by_ref {
+                    self.word_nbsp("ref");
+                    if rmutbl.is_mut() {
+                        self.word_nbsp("mut");
+                    }
                 }
                 self.print_ident(*ident);
                 if let Some(p) = sub {
@@ -1625,6 +1633,12 @@ impl<'a> State<'a> {
             PatKind::Box(inner) => {
                 self.word("box ");
                 self.print_pat(inner);
+            }
+            PatKind::Deref(inner) => {
+                self.word("deref!");
+                self.popen();
+                self.print_pat(inner);
+                self.pclose();
             }
             PatKind::Ref(inner, mutbl) => {
                 self.word("&");

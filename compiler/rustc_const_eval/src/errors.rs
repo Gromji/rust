@@ -25,6 +25,13 @@ pub(crate) struct DanglingPtrInFinal {
     pub kind: InternKind,
 }
 
+#[derive(Diagnostic)]
+#[diag(const_eval_nested_static_in_thread_local)]
+pub(crate) struct NestedStaticInThreadLocal {
+    #[primary_span]
+    pub span: Span,
+}
+
 #[derive(LintDiagnostic)]
 #[diag(const_eval_mutable_ptr_in_final)]
 pub(crate) struct MutablePtrInFinal {
@@ -884,6 +891,7 @@ impl ReportErrorExt for ResourceExhaustionInfo {
             ResourceExhaustionInfo::StackFrameLimitReached => const_eval_stack_frame_limit_reached,
             ResourceExhaustionInfo::MemoryExhausted => const_eval_memory_exhausted,
             ResourceExhaustionInfo::AddressSpaceFull => const_eval_address_space_full,
+            ResourceExhaustionInfo::Interrupted => const_eval_interrupted,
         }
     }
     fn add_args<G: EmissionGuarantee>(self, _: &mut Diag<'_, G>) {}

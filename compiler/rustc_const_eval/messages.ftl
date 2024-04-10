@@ -146,6 +146,8 @@ const_eval_intern_kind = {$kind ->
     *[other] {""}
 }
 
+const_eval_interrupted = compilation was interrupted
+
 const_eval_invalid_align_details =
     invalid align passed to `{$name}`: {$align} is {$err_kind ->
         [not_power_of_two] not a power of 2
@@ -220,6 +222,7 @@ const_eval_mut_deref =
 
 const_eval_mutable_ptr_in_final = encountered mutable pointer in final value of {const_eval_intern_kind}
 
+const_eval_nested_static_in_thread_local = #[thread_local] does not support implicit nested statics, please create explicit static items and refer to them instead
 const_eval_non_const_fmt_macro_call =
     cannot call non-const formatting macro in {const_eval_const_context}s
 

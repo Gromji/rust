@@ -5,7 +5,7 @@ use crate::back::write::{
     compute_per_cgu_lto_type, start_async_codegen, submit_codegened_module_to_llvm,
     submit_post_lto_module_to_llvm, submit_pre_lto_module_to_llvm, ComputedLtoType, OngoingCodegen,
 };
-use crate::common::{IntPredicate, RealPredicate, TypeKind};
+use crate::common::{self, IntPredicate, RealPredicate, TypeKind};
 use crate::errors;
 use crate::meth;
 use crate::mir;
@@ -33,7 +33,7 @@ use rustc_middle::mir::mono::{CodegenUnit, CodegenUnitNameBuilder, MonoItem};
 use rustc_middle::query::Providers;
 use rustc_middle::ty::layout::{HasTyCtxt, LayoutOf, TyAndLayout};
 use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
-use rustc_session::config::{self, CrateType, EntryFnType, OutputType};
+use rustc_session::config::{self, CrateType, EntryFnType, OptLevel, OutputType};
 use rustc_session::Session;
 use rustc_span::symbol::sym;
 use rustc_span::Symbol;
@@ -193,8 +193,8 @@ pub fn unsize_ptr<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
 ) -> (Bx::Value, Bx::Value) {
     debug!("unsize_ptr: {:?} => {:?}", src_ty, dst_ty);
     match (src_ty.kind(), dst_ty.kind()) {
-        (&ty::Ref(_, a, _), &ty::Ref(_, b, _) | &ty::RawPtr(ty::TypeAndMut { ty: b, .. }))
-        | (&ty::RawPtr(ty::TypeAndMut { ty: a, .. }), &ty::RawPtr(ty::TypeAndMut { ty: b, .. })) => {
+        (&ty::Ref(_, a, _), &ty::Ref(_, b, _) | &ty::RawPtr(b, _))
+        | (&ty::RawPtr(a, _), &ty::RawPtr(b, _)) => {
             assert_eq!(bx.cx().type_is_sized(a), old_info.is_none());
             (src, unsized_info(bx, a, b, old_info))
         }
@@ -300,14 +300,35 @@ pub fn coerce_unsized_into<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     }
 }
 
-pub fn cast_shift_expr_rhs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
+/// Returns `rhs` sufficiently masked, truncated, and/or extended so that
+/// it can be used to shift `lhs`.
+///
+/// Shifts in MIR are all allowed to have mismatched LHS & RHS types.
+/// The shift methods in `BuilderMethods`, however, are fully homogeneous
+/// (both parameters and the return type are all the same type).
+///
+/// If `is_unchecked` is false, this masks the RHS to ensure it stays in-bounds,
+/// as the `BuilderMethods` shifts are UB for out-of-bounds shift amounts.
+/// For 32- and 64-bit types, this matches the semantics
+/// of Java. (See related discussion on #1877 and #10183.)
+///
+/// If `is_unchecked` is true, this does no masking, and adds sufficient `assume`
+/// calls or operation flags to preserve as much freedom to optimize as possible.
+pub fn build_shift_expr_rhs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     bx: &mut Bx,
     lhs: Bx::Value,
-    rhs: Bx::Value,
+    mut rhs: Bx::Value,
+    is_unchecked: bool,
 ) -> Bx::Value {
     // Shifts may have any size int on the rhs
     let mut rhs_llty = bx.cx().val_ty(rhs);
     let mut lhs_llty = bx.cx().val_ty(lhs);
+
+    let mask = common::shift_mask_val(bx, lhs_llty, rhs_llty, false);
+    if !is_unchecked {
+        rhs = bx.and(rhs, mask);
+    }
+
     if bx.cx().type_kind(rhs_llty) == TypeKind::Vector {
         rhs_llty = bx.cx().element_type(rhs_llty)
     }
@@ -317,6 +338,12 @@ pub fn cast_shift_expr_rhs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     let rhs_sz = bx.cx().int_width(rhs_llty);
     let lhs_sz = bx.cx().int_width(lhs_llty);
     if lhs_sz < rhs_sz {
+        if is_unchecked && bx.sess().opts.optimize != OptLevel::No {
+            // FIXME: Use `trunc nuw` once that's available
+            let inrange = bx.icmp(IntPredicate::IntULE, rhs, mask);
+            bx.assume(inrange);
+        }
+
         bx.trunc(rhs, lhs_llty)
     } else if lhs_sz > rhs_sz {
         // We zero-extend even if the RHS is signed. So e.g. `(x: i32) << -1i8` will zero-extend the
@@ -462,27 +489,34 @@ pub fn maybe_create_entry_wrapper<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         let ptr_ty = cx.type_ptr();
         let (arg_argc, arg_argv) = get_argc_argv(cx, &mut bx);
 
-        let (start_fn, start_ty, args) = if let EntryFnType::Main { sigpipe } = entry_type {
+        let (start_fn, start_ty, args, instance) = if let EntryFnType::Main { sigpipe } = entry_type
+        {
             let start_def_id = cx.tcx().require_lang_item(LangItem::Start, None);
-            let start_fn = cx.get_fn_addr(ty::Instance::expect_resolve(
+            let start_instance = ty::Instance::expect_resolve(
                 cx.tcx(),
                 ty::ParamEnv::reveal_all(),
                 start_def_id,
                 cx.tcx().mk_args(&[main_ret_ty.into()]),
-            ));
+            );
+            let start_fn = cx.get_fn_addr(start_instance);
 
             let i8_ty = cx.type_i8();
             let arg_sigpipe = bx.const_u8(sigpipe);
 
             let start_ty = cx.type_func(&[cx.val_ty(rust_main), isize_ty, ptr_ty, i8_ty], isize_ty);
-            (start_fn, start_ty, vec![rust_main, arg_argc, arg_argv, arg_sigpipe])
+            (
+                start_fn,
+                start_ty,
+                vec![rust_main, arg_argc, arg_argv, arg_sigpipe],
+                Some(start_instance),
+            )
         } else {
             debug!("using user-defined start fn");
             let start_ty = cx.type_func(&[isize_ty, ptr_ty], isize_ty);
-            (rust_main, start_ty, vec![arg_argc, arg_argv])
+            (rust_main, start_ty, vec![arg_argc, arg_argv], None)
         };
 
-        let result = bx.call(start_ty, None, None, start_fn, &args, None);
+        let result = bx.call(start_ty, None, None, start_fn, &args, None, instance);
         if cx.sess().target.os.contains("uefi") {
             bx.ret(result);
         } else {
@@ -622,6 +656,8 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
                 object: Some(file_name),
                 dwarf_object: None,
                 bytecode: None,
+                assembly: None,
+                llvm_ir: None,
             }
         })
     });

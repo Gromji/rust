@@ -10,7 +10,7 @@ use crate::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use crate::infer::InferCtxtExt as _;
 use crate::infer::{self, InferCtxt};
 use crate::traits::error_reporting::infer_ctxt_ext::InferCtxtExt;
-use crate::traits::error_reporting::{ambiguity, ambiguity::Ambiguity::*};
+use crate::traits::error_reporting::{ambiguity, ambiguity::CandidateSource::*};
 use crate::traits::query::evaluate_obligation::InferCtxtExt as _;
 use crate::traits::specialize::to_pretty_impl_header;
 use crate::traits::NormalizeExt;
@@ -21,6 +21,7 @@ use crate::traits::{
 };
 use core::ops::ControlFlow;
 use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
+use rustc_data_structures::unord::UnordSet;
 use rustc_errors::codes::*;
 use rustc_errors::{pluralize, struct_span_code_err, Applicability, MultiSpan, StringPart};
 use rustc_errors::{Diag, EmissionGuarantee, ErrorGuaranteed, FatalError, StashKey};
@@ -557,7 +558,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                                 GetSafeTransmuteErrorAndReason::Error {
                                     err_msg,
                                     safe_transmute_explanation,
-                                } => (err_msg, Some(safe_transmute_explanation)),
+                                } => (err_msg, safe_transmute_explanation),
                             }
                         } else {
                             (err_msg, None)
@@ -1127,10 +1128,11 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
         err: &mut Diag<'_>,
     ) -> bool {
         let span = obligation.cause.span;
-        struct V {
+        /// Look for the (direct) sub-expr of `?`, and return it if it's a `.` method call.
+        struct FindMethodSubexprOfTry {
             search_span: Span,
         }
-        impl<'v> Visitor<'v> for V {
+        impl<'v> Visitor<'v> for FindMethodSubexprOfTry {
             type Result = ControlFlow<&'v hir::Expr<'v>>;
             fn visit_expr(&mut self, ex: &'v hir::Expr<'v>) -> Self::Result {
                 if let hir::ExprKind::Match(expr, _arms, hir::MatchSource::TryDesugar(_)) = ex.kind
@@ -1148,8 +1150,8 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
             hir::Node::Item(hir::Item { kind: hir::ItemKind::Fn(_, _, body_id), .. }) => body_id,
             _ => return false,
         };
-        let ControlFlow::Break(expr) =
-            (V { search_span: span }).visit_body(self.tcx.hir().body(*body_id))
+        let ControlFlow::Break(expr) = (FindMethodSubexprOfTry { search_span: span })
+            .visit_body(self.tcx.hir().body(*body_id))
         else {
             return false;
         };
@@ -1272,7 +1274,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
             {
                 let parent = self.tcx.parent_hir_node(binding.hir_id);
                 // We've reached the root of the method call chain...
-                if let hir::Node::Local(local) = parent
+                if let hir::Node::LetStmt(local) = parent
                     && let Some(binding_expr) = local.init
                 {
                     // ...and it is a binding. Get the binding creation and continue the chain.
@@ -1357,7 +1359,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                     "using function pointers as const generic parameters is forbidden",
                 )
             }
-            ty::RawPtr(_) => {
+            ty::RawPtr(_, _) => {
                 struct_span_code_err!(
                     self.dcx(),
                     span,
@@ -1802,6 +1804,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                 ty::Foreign(..) => Some(19),
                 ty::CoroutineWitness(..) => Some(20),
                 ty::CoroutineClosure(..) => Some(21),
+                ty::Pat(..) => Some(22),
                 ty::Placeholder(..) | ty::Bound(..) | ty::Infer(..) | ty::Error(_) => None,
             }
         }
@@ -1809,9 +1812,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
         let strip_references = |mut t: Ty<'tcx>| -> Ty<'tcx> {
             loop {
                 match t.kind() {
-                    ty::Ref(_, inner, _) | ty::RawPtr(ty::TypeAndMut { ty: inner, .. }) => {
-                        t = *inner
-                    }
+                    ty::Ref(_, inner, _) | ty::RawPtr(inner, _) => t = *inner,
                     _ => break t,
                 }
             }
@@ -1907,7 +1908,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
             .all_impls(trait_pred.def_id())
             .filter_map(|def_id| {
                 let imp = self.tcx.impl_trait_header(def_id).unwrap();
-                if imp.polarity == ty::ImplPolarity::Negative
+                if imp.polarity != ty::ImplPolarity::Positive
                     || !self.tcx.is_user_visible_dep(def_id.krate)
                 {
                     return None;
@@ -2119,7 +2120,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                 })
                 .collect();
 
-            impl_candidates.sort();
+            impl_candidates.sort_by_key(|tr| tr.to_string());
             impl_candidates.dedup();
             return report(impl_candidates, err);
         }
@@ -2145,7 +2146,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                 cand
             })
             .collect();
-        impl_candidates.sort_by_key(|cand| (cand.similarity, cand.trait_ref));
+        impl_candidates.sort_by_key(|cand| (cand.similarity, cand.trait_ref.to_string()));
         let mut impl_candidates: Vec<_> =
             impl_candidates.into_iter().map(|cand| cand.trait_ref).collect();
         impl_candidates.dedup();
@@ -2245,14 +2246,18 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
         };
 
         let required_trait_path = self.tcx.def_path_str(trait_ref.def_id());
-        let traits_with_same_path: std::collections::BTreeSet<_> = self
+        let traits_with_same_path: UnordSet<_> = self
             .tcx
             .all_traits()
             .filter(|trait_def_id| *trait_def_id != trait_ref.def_id())
-            .filter(|trait_def_id| self.tcx.def_path_str(*trait_def_id) == required_trait_path)
+            .map(|trait_def_id| (self.tcx.def_path_str(trait_def_id), trait_def_id))
+            .filter(|(p, _)| *p == required_trait_path)
             .collect();
+
+        let traits_with_same_path =
+            traits_with_same_path.into_items().into_sorted_stable_ord_by_key(|(p, _)| p);
         let mut suggested = false;
-        for trait_with_same_path in traits_with_same_path {
+        for (_, trait_with_same_path) in traits_with_same_path {
             let trait_impls = get_trait_impls(trait_with_same_path);
             if trait_impls.is_empty() {
                 continue;
@@ -2382,7 +2387,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                     )
                 };
 
-                let mut ambiguities = ambiguity::recompute_applicable_impls(
+                let mut ambiguities = ambiguity::compute_applicable_impls_for_diagnostics(
                     self.infcx,
                     &obligation.with(self.tcx, trait_ref),
                 );
@@ -2698,7 +2703,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
     fn annotate_source_of_ambiguity(
         &self,
         err: &mut Diag<'_>,
-        ambiguities: &[ambiguity::Ambiguity],
+        ambiguities: &[ambiguity::CandidateSource],
         predicate: ty::Predicate<'tcx>,
     ) {
         let mut spans = vec![];
@@ -2707,7 +2712,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
         let mut has_param_env = false;
         for ambiguity in ambiguities {
             match ambiguity {
-                ambiguity::Ambiguity::DefId(impl_def_id) => {
+                ambiguity::CandidateSource::DefId(impl_def_id) => {
                     match self.tcx.span_of_impl(*impl_def_id) {
                         Ok(span) => spans.push(span),
                         Err(name) => {
@@ -2718,7 +2723,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                         }
                     }
                 }
-                ambiguity::Ambiguity::ParamEnv(span) => {
+                ambiguity::CandidateSource::ParamEnv(span) => {
                     has_param_env = true;
                     spans.push(*span);
                 }
@@ -3063,26 +3068,31 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
             return GetSafeTransmuteErrorAndReason::Silent;
         };
 
+        let dst = trait_ref.args.type_at(0);
+        let src = trait_ref.args.type_at(1);
+        let err_msg = format!("`{src}` cannot be safely transmuted into `{dst}`");
+
         match rustc_transmute::TransmuteTypeEnv::new(self.infcx).is_transmutable(
             obligation.cause,
             src_and_dst,
             assume,
         ) {
             Answer::No(reason) => {
-                let dst = trait_ref.args.type_at(0);
-                let src = trait_ref.args.type_at(1);
-                let err_msg = format!("`{src}` cannot be safely transmuted into `{dst}`");
                 let safe_transmute_explanation = match reason {
                     rustc_transmute::Reason::SrcIsNotYetSupported => {
-                        format!("analyzing the transmutability of `{src}` is not yet supported.")
+                        format!("analyzing the transmutability of `{src}` is not yet supported")
                     }
 
                     rustc_transmute::Reason::DstIsNotYetSupported => {
-                        format!("analyzing the transmutability of `{dst}` is not yet supported.")
+                        format!("analyzing the transmutability of `{dst}` is not yet supported")
                     }
 
                     rustc_transmute::Reason::DstIsBitIncompatible => {
                         format!("at least one value of `{src}` isn't a bit-valid value of `{dst}`")
+                    }
+
+                    rustc_transmute::Reason::DstUninhabited => {
+                        format!("`{dst}` is uninhabited")
                     }
 
                     rustc_transmute::Reason::DstMayHaveSafetyInvariants => {
@@ -3130,14 +3140,23 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                         format!("`{dst}` has an unknown layout")
                     }
                 };
-                GetSafeTransmuteErrorAndReason::Error { err_msg, safe_transmute_explanation }
+                GetSafeTransmuteErrorAndReason::Error {
+                    err_msg,
+                    safe_transmute_explanation: Some(safe_transmute_explanation),
+                }
             }
             // Should never get a Yes at this point! We already ran it before, and did not get a Yes.
             Answer::Yes => span_bug!(
                 span,
                 "Inconsistent rustc_transmute::is_transmutable(...) result, got Yes",
             ),
-            other => span_bug!(span, "Unsupported rustc_transmute::Answer variant: `{other:?}`"),
+            // Reached when a different obligation (namely `Freeze`) causes the
+            // transmutability analysis to fail. In this case, silence the
+            // transmutability error message in favor of that more specific
+            // error.
+            Answer::If(_) => {
+                GetSafeTransmuteErrorAndReason::Error { err_msg, safe_transmute_explanation: None }
+            }
         }
     }
 
@@ -3538,12 +3557,39 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                     let mut err =
                         self.dcx().struct_span_err(span, "unconstrained generic constant");
                     let const_span = self.tcx.def_span(uv.def);
+
+                    let const_ty = self.tcx.type_of(uv.def).instantiate(self.tcx, uv.args);
+                    let cast = if const_ty != self.tcx.types.usize { " as usize" } else { "" };
+                    let msg = "try adding a `where` bound";
                     match self.tcx.sess.source_map().span_to_snippet(const_span) {
-                            Ok(snippet) => err.help(format!(
-                                "try adding a `where` bound using this expression: `where [(); {snippet}]:`"
-                            )),
-                            _ => err.help("consider adding a `where` bound using this expression"),
-                        };
+                        Ok(snippet) => {
+                            let code = format!("[(); {snippet}{cast}]:");
+                            let def_id = if let ObligationCauseCode::CompareImplItemObligation {
+                                trait_item_def_id,
+                                ..
+                            } = obligation.cause.code()
+                            {
+                                trait_item_def_id.as_local()
+                            } else {
+                                Some(obligation.cause.body_id)
+                            };
+                            if let Some(def_id) = def_id
+                                && let Some(generics) = self.tcx.hir().get_generics(def_id)
+                            {
+                                err.span_suggestion_verbose(
+                                    generics.tail_span_for_predicate_suggestion(),
+                                    msg,
+                                    format!("{} {code}", generics.add_where_or_trailing_comma()),
+                                    Applicability::MaybeIncorrect,
+                                );
+                            } else {
+                                err.help(format!("{msg}: where {code}"));
+                            };
+                        }
+                        _ => {
+                            err.help(msg);
+                        }
+                    };
                     Ok(err)
                 }
                 ty::ConstKind::Expr(_) => {

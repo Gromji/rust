@@ -13,7 +13,7 @@ use rustc_infer::infer::{RegionVariableOrigin, TyCtxtInferExt};
 use rustc_infer::traits::{Obligation, TraitEngineExt as _};
 use rustc_lint_defs::builtin::REPR_TRANSPARENT_EXTERNAL_PRIVATE_FIELDS;
 use rustc_middle::middle::stability::EvalResult;
-use rustc_middle::traits::{DefiningAnchor, ObligationCauseCode};
+use rustc_middle::traits::ObligationCauseCode;
 use rustc_middle::ty::fold::BottomUpFolder;
 use rustc_middle::ty::layout::{LayoutError, MAX_SIMD_LANES};
 use rustc_middle::ty::util::{Discr, InspectCoroutineFields, IntTypeExt};
@@ -345,10 +345,7 @@ fn check_opaque_meets_bounds<'tcx>(
     };
     let param_env = tcx.param_env(defining_use_anchor);
 
-    let infcx = tcx
-        .infer_ctxt()
-        .with_opaque_type_inference(DefiningAnchor::bind(tcx, defining_use_anchor))
-        .build();
+    let infcx = tcx.infer_ctxt().with_opaque_type_inference(defining_use_anchor).build();
     let ocx = ObligationCtxt::new(&infcx);
 
     let args = match *origin {
@@ -382,8 +379,8 @@ fn check_opaque_meets_bounds<'tcx>(
         Ok(()) => {}
         Err(ty_err) => {
             // Some types may be left "stranded" if they can't be reached
-            // from an astconv'd bound but they're mentioned in the HIR. This
-            // will happen, e.g., when a nested opaque is inside of a non-
+            // from a lowered rustc_middle bound but they're mentioned in the HIR.
+            // This will happen, e.g., when a nested opaque is inside of a non-
             // existent associated type, like `impl Trait<Missing = impl Trait>`.
             // See <tests/ui/impl-trait/stranded-opaque.rs>.
             let ty_err = ty_err.to_string(tcx);
@@ -499,7 +496,7 @@ fn is_enum_of_nonnullable_ptr<'tcx>(
 fn check_static_linkage(tcx: TyCtxt<'_>, def_id: LocalDefId) {
     if tcx.codegen_fn_attrs(def_id).import_linkage.is_some() {
         if match tcx.type_of(def_id).instantiate_identity().kind() {
-            ty::RawPtr(_) => false,
+            ty::RawPtr(_, _) => false,
             ty::Adt(adt_def, args) => !is_enum_of_nonnullable_ptr(tcx, *adt_def, *args),
             _ => true,
         } {
@@ -899,7 +896,7 @@ pub fn check_simd(tcx: TyCtxt<'_>, sp: Span, def_id: LocalDefId) {
             struct_span_code_err!(tcx.dcx(), sp, E0075, "SIMD vector cannot be empty").emit();
             return;
         }
-        let e = fields[FieldIdx::from_u32(0)].ty(tcx, args);
+        let e = fields[FieldIdx::ZERO].ty(tcx, args);
         if !fields.iter().all(|f| f.ty(tcx, args) == e) {
             struct_span_code_err!(tcx.dcx(), sp, E0076, "SIMD vector should be homogeneous")
                 .with_span_label(sp, "SIMD elements must have the same type")
@@ -934,10 +931,13 @@ pub fn check_simd(tcx: TyCtxt<'_>, sp: Span, def_id: LocalDefId) {
         // No: char, "fat" pointers, compound types
         match e.kind() {
             ty::Param(_) => (), // pass struct<T>(T, T, T, T) through, let monomorphization catch errors
-            ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::RawPtr(_) => (), // struct(u8, u8, u8, u8) is ok
+            ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::RawPtr(_, _) => (), // struct(u8, u8, u8, u8) is ok
             ty::Array(t, _) if matches!(t.kind(), ty::Param(_)) => (), // pass struct<T>([T; N]) through, let monomorphization catch errors
             ty::Array(t, _clen)
-                if matches!(t.kind(), ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::RawPtr(_)) =>
+                if matches!(
+                    t.kind(),
+                    ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::RawPtr(_, _)
+                ) =>
             { /* struct([f32; 4]) is ok */ }
             _ => {
                 struct_span_code_err!(
@@ -961,7 +961,7 @@ pub(super) fn check_packed(tcx: TyCtxt<'_>, sp: Span, def: ty::AdtDef<'_>) {
             for r in attr::parse_repr_attr(tcx.sess, attr) {
                 if let attr::ReprPacked(pack) = r
                     && let Some(repr_pack) = repr.pack
-                    && pack as u64 != repr_pack.bytes()
+                    && pack != repr_pack
                 {
                     struct_span_code_err!(
                         tcx.dcx(),
@@ -1564,7 +1564,7 @@ pub(super) fn check_coroutine_obligations(
         .ignoring_regions()
         // Bind opaque types to type checking root, as they should have been checked by borrowck,
         // but may show up in some cases, like when (root) obligations are stalled in the new solver.
-        .with_opaque_type_inference(DefiningAnchor::bind(tcx, typeck.hir_owner.def_id))
+        .with_opaque_type_inference(typeck.hir_owner.def_id)
         .build();
 
     let mut fulfillment_cx = <dyn TraitEngine<'_>>::new(&infcx);

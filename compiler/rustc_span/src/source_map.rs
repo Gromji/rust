@@ -654,6 +654,12 @@ impl SourceMap {
         })
     }
 
+    /// Extends the span to include any trailing whitespace, or returns the original
+    /// span if a `SpanSnippetError` was encountered.
+    pub fn span_extend_while_whitespace(&self, span: Span) -> Span {
+        self.span_extend_while(span, char::is_whitespace).unwrap_or(span)
+    }
+
     /// Extends the given `Span` to previous character while the previous character matches the predicate
     pub fn span_extend_prev_while(
         &self,
@@ -1034,12 +1040,9 @@ impl SourceMap {
     /// // ^^^^^^ input
     /// ```
     pub fn mac_call_stmt_semi_span(&self, mac_call: Span) -> Option<Span> {
-        let span = self.span_extend_while(mac_call, char::is_whitespace).ok()?;
-        let span = span.shrink_to_hi().with_hi(BytePos(span.hi().0.checked_add(1)?));
-        if self.span_to_snippet(span).as_deref() != Ok(";") {
-            return None;
-        }
-        Some(span)
+        let span = self.span_extend_while_whitespace(mac_call);
+        let span = self.next_point(span);
+        if self.span_to_snippet(span).as_deref() == Ok(";") { Some(span) } else { None }
     }
 }
 
@@ -1126,6 +1129,21 @@ impl FilePathMapping {
             }
             FileName::Real(_) => unreachable!("attempted to remap an already remapped filename"),
             other => (other.clone(), false),
+        }
+    }
+
+    /// Applies any path prefix substitution as defined by the mapping.
+    /// The return value is the local path with a "virtual path" representing the remapped
+    /// part if any remapping was performed.
+    pub fn to_real_filename<'a>(&self, local_path: impl Into<Cow<'a, Path>>) -> RealFileName {
+        let local_path = local_path.into();
+        if let (remapped_path, true) = self.map_prefix(&*local_path) {
+            RealFileName::Remapped {
+                virtual_name: remapped_path.into_owned(),
+                local_path: Some(local_path.into_owned()),
+            }
+        } else {
+            RealFileName::LocalPath(local_path.into_owned())
         }
     }
 

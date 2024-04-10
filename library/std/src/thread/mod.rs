@@ -159,7 +159,7 @@
 mod tests;
 
 use crate::any::Any;
-use crate::cell::UnsafeCell;
+use crate::cell::{OnceCell, UnsafeCell};
 use crate::ffi::{CStr, CString};
 use crate::fmt;
 use crate::io;
@@ -174,7 +174,6 @@ use crate::str;
 use crate::sync::Arc;
 use crate::sys::thread as imp;
 use crate::sys_common::thread;
-use crate::sys_common::thread_info;
 use crate::sys_common::thread_parking::Parker;
 use crate::sys_common::{AsInner, IntoInner};
 use crate::time::{Duration, Instant};
@@ -518,12 +517,8 @@ impl Builder {
 
             crate::io::set_output_capture(output_capture);
 
-            // SAFETY: we constructed `f` initialized.
             let f = f.into_inner();
-            // SAFETY: the stack guard passed is the one for the current thread.
-            // This means the current thread's stack and the new thread's stack
-            // are properly set and protected from each other.
-            thread_info::set(unsafe { imp::guard::current() }, their_thread);
+            set_current(their_thread);
             let try_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                 crate::sys_common::backtrace::__rust_begin_short_backtrace(f)
             }));
@@ -683,6 +678,25 @@ where
     Builder::new().spawn(f).expect("failed to spawn thread")
 }
 
+thread_local! {
+    static CURRENT: OnceCell<Thread> = const { OnceCell::new() };
+}
+
+/// Sets the thread handle for the current thread.
+///
+/// Panics if the handle has been set already or when called from a TLS destructor.
+pub(crate) fn set_current(thread: Thread) {
+    CURRENT.with(|current| current.set(thread).unwrap());
+}
+
+/// Gets a handle to the thread that invokes it.
+///
+/// In contrast to the public `current` function, this will not panic if called
+/// from inside a TLS destructor.
+pub(crate) fn try_current() -> Option<Thread> {
+    CURRENT.try_with(|current| current.get_or_init(|| Thread::new(None)).clone()).ok()
+}
+
 /// Gets a handle to the thread that invokes it.
 ///
 /// # Examples
@@ -705,7 +719,7 @@ where
 #[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn current() -> Thread {
-    thread_info::current_thread().expect(
+    try_current().expect(
         "use of std::thread::current() is not possible \
          after the thread's local data has been destroyed",
     )
@@ -1231,9 +1245,16 @@ impl ThreadId {
 // Thread
 ////////////////////////////////////////////////////////////////////////////////
 
+/// The internal representation of a `Thread`'s name.
+enum ThreadName {
+    Main,
+    Other(CString),
+    Unnamed,
+}
+
 /// The internal representation of a `Thread` handle
 struct Inner {
-    name: Option<CString>, // Guaranteed to be UTF-8
+    name: ThreadName, // Guaranteed to be UTF-8
     id: ThreadId,
     parker: Parker,
 }
@@ -1270,8 +1291,20 @@ pub struct Thread {
 
 impl Thread {
     // Used only internally to construct a thread object without spawning
-    // Panics if the name contains nuls.
     pub(crate) fn new(name: Option<CString>) -> Thread {
+        if let Some(name) = name {
+            Self::new_inner(ThreadName::Other(name))
+        } else {
+            Self::new_inner(ThreadName::Unnamed)
+        }
+    }
+
+    // Used in runtime to construct main thread
+    pub(crate) fn new_main() -> Thread {
+        Self::new_inner(ThreadName::Main)
+    }
+
+    fn new_inner(name: ThreadName) -> Thread {
         // We have to use `unsafe` here to construct the `Parker` in-place,
         // which is required for the UNIX implementation.
         //
@@ -1398,7 +1431,11 @@ impl Thread {
     }
 
     fn cname(&self) -> Option<&CStr> {
-        self.inner.name.as_deref()
+        match &self.inner.name {
+            ThreadName::Main => Some(c"main"),
+            ThreadName::Other(other) => Some(&other),
+            ThreadName::Unnamed => None,
+        }
     }
 }
 

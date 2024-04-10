@@ -274,6 +274,7 @@ impl Step for Llvm {
             target.to_string()
         };
 
+        // If LLVM has already been built or been downloaded through download-ci-llvm, we avoid building it again.
         let Meta { stamp, res, out_dir, root } = match prebuilt_llvm_config(builder, target) {
             Ok(p) => return p,
             Err(m) => m,
@@ -364,10 +365,11 @@ impl Step for Llvm {
             cfg.define("LLVM_ENABLE_ZLIB", "OFF");
         }
 
-        // Are we compiling for iOS/tvOS/watchOS?
+        // Are we compiling for iOS/tvOS/watchOS/visionOS?
         if target.contains("apple-ios")
             || target.contains("apple-tvos")
             || target.contains("apple-watchos")
+            || target.contains("apple-visionos")
         {
             // These two defines prevent CMake from automatically trying to add a MacOSX sysroot, which leads to a compiler error.
             cfg.define("CMAKE_OSX_SYSROOT", "/");

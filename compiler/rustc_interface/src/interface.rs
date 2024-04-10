@@ -10,7 +10,9 @@ use rustc_data_structures::sync::Lrc;
 use rustc_errors::registry::Registry;
 use rustc_errors::{DiagCtxt, ErrorGuaranteed};
 use rustc_lint::LintStore;
+
 use rustc_middle::ty;
+use rustc_middle::ty::CurrentGcx;
 use rustc_middle::util::Providers;
 use rustc_parse::maybe_new_parser_from_source_str;
 use rustc_query_impl::QueryCtxt;
@@ -39,6 +41,7 @@ pub struct Compiler {
     pub sess: Session,
     pub codegen_backend: Box<dyn CodegenBackend>,
     pub(crate) override_queries: Option<fn(&Session, &mut Providers)>,
+    pub(crate) current_gcx: CurrentGcx,
 }
 
 /// Converts strings provided as `--cfg [cfgspec]` into a `Cfg`.
@@ -48,6 +51,7 @@ pub(crate) fn parse_cfg(dcx: &DiagCtxt, cfgs: Vec<String>) -> Cfg {
             let psess = ParseSess::with_silent_emitter(
                 vec![crate::DEFAULT_LOCALE_RESOURCE, rustc_parse::DEFAULT_LOCALE_RESOURCE],
                 format!("this error occurred on the command line: `--cfg={s}`"),
+                true,
             );
             let filename = FileName::cfg_spec_source_code(&s);
 
@@ -111,6 +115,7 @@ pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
         let psess = ParseSess::with_silent_emitter(
             vec![crate::DEFAULT_LOCALE_RESOURCE, rustc_parse::DEFAULT_LOCALE_RESOURCE],
             format!("this error occurred on the command line: `--check-cfg={s}`"),
+            true,
         );
         let filename = FileName::cfg_spec_source_code(&s);
 
@@ -334,57 +339,28 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
     util::run_in_thread_pool_with_globals(
         config.opts.edition,
         config.opts.unstable_opts.threads,
-        || {
+        |current_gcx| {
             crate::callbacks::setup_callbacks();
 
             let early_dcx = EarlyDiagCtxt::new(config.opts.error_format);
 
             let sysroot = filesearch::materialize_sysroot(config.opts.maybe_sysroot.clone());
 
-            let (codegen_backend, target_override) = match config.make_codegen_backend {
-                None => {
-                    // Build a target without override, so that it can override the backend if needed
-                    let target =
-                        config::build_target_config(&early_dcx, &config.opts, None, &sysroot);
+            let target = config::build_target_config(&early_dcx, &config.opts, &sysroot);
 
-                    let backend = util::get_codegen_backend(
-                        &early_dcx,
-                        &sysroot,
-                        config.opts.unstable_opts.codegen_backend.as_deref(),
-                        &target,
-                    );
-
-                    // target_override is documented to be called before init(), so this is okay
-                    let target_override = backend.target_override(&config.opts);
-
-                    // Assert that we don't use target's override of the backend and
-                    // backend's override of the target at the same time
-                    if config.opts.unstable_opts.codegen_backend.is_none()
-                        && target.default_codegen_backend.is_some()
-                        && target_override.is_some()
-                    {
-                        rustc_middle::bug!(
-                            "Codegen backend requested target override even though the target requested the backend"
-                        );
-                    }
-
-                    (backend, target_override)
-                }
+            let codegen_backend = match config.make_codegen_backend {
+                None => util::get_codegen_backend(
+                    &early_dcx,
+                    &sysroot,
+                    config.opts.unstable_opts.codegen_backend.as_deref(),
+                    &target,
+                ),
                 Some(make_codegen_backend) => {
-                    // N.B. `make_codegen_backend` takes precedence over `target.default_codegen_backend`,
-                    //      which is ignored in this case.
-                    let backend = make_codegen_backend(&config.opts);
-
-                    // target_override is documented to be called before init(), so this is okay
-                    let target_override = backend.target_override(&config.opts);
-
-                    (backend, target_override)
+                    // N.B. `make_codegen_backend` takes precedence over
+                    // `target.default_codegen_backend`, which is ignored in this case.
+                    make_codegen_backend(&config.opts)
                 }
             };
-
-            // Re-build target with the (potential) override
-            let target_cfg =
-                config::build_target_config(&early_dcx, &config.opts, target_override, &sysroot);
 
             let temps_dir = config.opts.unstable_opts.temps_dir.as_deref().map(PathBuf::from);
 
@@ -418,7 +394,7 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
                 locale_resources,
                 config.lint_caps,
                 config.file_loader,
-                target_cfg,
+                target,
                 sysroot,
                 util::rustc_version_str().unwrap_or("unknown"),
                 config.ice_file,
@@ -457,8 +433,12 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
             }
             sess.lint_store = Some(Lrc::new(lint_store));
 
-            let compiler =
-                Compiler { sess, codegen_backend, override_queries: config.override_queries };
+            let compiler = Compiler {
+                sess,
+                codegen_backend,
+                override_queries: config.override_queries,
+                current_gcx,
+            };
 
             rustc_span::set_source_map(compiler.sess.psess.clone_source_map(), move || {
                 // There are two paths out of `f`.

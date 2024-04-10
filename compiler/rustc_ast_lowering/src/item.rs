@@ -11,7 +11,7 @@ use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{LocalDefId, CRATE_DEF_ID};
 use rustc_hir::PredicateOrigin;
-use rustc_index::{Idx, IndexSlice, IndexVec};
+use rustc_index::{IndexSlice, IndexVec};
 use rustc_middle::span_bug;
 use rustc_middle::ty::{ResolverAstLowering, TyCtxt};
 use rustc_span::edit_distance::find_best_match_for_name;
@@ -563,7 +563,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                         let kind =
                             this.lower_use_tree(use_tree, &prefix, id, vis_span, &mut ident, attrs);
                         if let Some(attrs) = attrs {
-                            this.attrs.insert(hir::ItemLocalId::new(0), attrs);
+                            this.attrs.insert(hir::ItemLocalId::ZERO, attrs);
                         }
 
                         let item = hir::Item {
@@ -1427,8 +1427,8 @@ impl<'hir> LoweringContext<'_, 'hir> {
         // Error if `?Trait` bounds in where clauses don't refer directly to type parameters.
         // Note: we used to clone these bounds directly onto the type parameter (and avoid lowering
         // these into hir when we lower thee where clauses), but this makes it quite difficult to
-        // keep track of the Span info. Now, `add_implicitly_sized` in `AstConv` checks both param bounds and
-        // where clauses for `?Sized`.
+        // keep track of the Span info. Now, `<dyn HirTyLowerer>::add_implicit_sized_bound`
+        // checks both param bounds and where clauses for `?Sized`.
         for pred in &generics.where_clause.predicates {
             let WherePredicate::BoundPredicate(bound_pred) = pred else {
                 continue;

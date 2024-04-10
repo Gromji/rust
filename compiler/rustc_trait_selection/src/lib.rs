@@ -26,12 +26,11 @@
 #![feature(option_take_if)]
 #![feature(never_type)]
 #![feature(type_alias_impl_trait)]
-#![cfg_attr(bootstrap, feature(min_specialization))]
 #![recursion_limit = "512"] // For rustdoc
 
 #[macro_use]
 extern crate rustc_macros;
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
 #[macro_use]
 extern crate rustc_data_structures;
 #[macro_use]

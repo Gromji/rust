@@ -345,13 +345,14 @@ impl<'cx, 'tcx> Visitor<'tcx> for WritebackCx<'cx, 'tcx> {
             _ => {}
         };
 
+        self.visit_skipped_ref_pats(p.hir_id);
         self.visit_pat_adjustments(p.span, p.hir_id);
 
         self.visit_node_id(p.span, p.hir_id);
         intravisit::walk_pat(self, p);
     }
 
-    fn visit_local(&mut self, l: &'tcx hir::Local<'tcx>) {
+    fn visit_local(&mut self, l: &'tcx hir::LetStmt<'tcx>) {
         intravisit::walk_local(self, l);
         let var_ty = self.fcx.local_ty(l.span, l.hir_id);
         let var_ty = self.resolve(var_ty, &l.span);
@@ -671,6 +672,14 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
                 debug!(?resolved_adjustment);
                 self.typeck_results.pat_adjustments_mut().insert(hir_id, resolved_adjustment);
             }
+        }
+    }
+
+    #[instrument(skip(self), level = "debug")]
+    fn visit_skipped_ref_pats(&mut self, hir_id: hir::HirId) {
+        if self.fcx.typeck_results.borrow_mut().skipped_ref_pats_mut().remove(hir_id) {
+            debug!("node is a skipped ref pat");
+            self.typeck_results.skipped_ref_pats_mut().insert(hir_id);
         }
     }
 

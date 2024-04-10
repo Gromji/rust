@@ -229,6 +229,22 @@ pub(crate) fn type_check<'mir, 'tcx>(
                 );
             }
 
+            // Convert all regions to nll vars.
+            let (opaque_type_key, hidden_type) =
+                infcx.tcx.fold_regions((opaque_type_key, hidden_type), |region, _| {
+                    match region.kind() {
+                        ty::ReVar(_) => region,
+                        ty::RePlaceholder(placeholder) => checker
+                            .borrowck_context
+                            .constraints
+                            .placeholder_region(infcx, placeholder),
+                        _ => ty::Region::new_var(
+                            infcx.tcx,
+                            checker.borrowck_context.universal_regions.to_region_vid(region),
+                        ),
+                    }
+                });
+
             (opaque_type_key, hidden_type)
         })
         .collect();
@@ -592,7 +608,7 @@ impl<'a, 'b, 'tcx> TypeVerifier<'a, 'b, 'tcx> {
             }
             self.cx.borrowck_context.constraints.outlives_constraints.push(constraint)
         }
-        // If the region is live at at least one location in the promoted MIR,
+        // If the region is live at least one location in the promoted MIR,
         // then add a liveness constraint to the main MIR for this region
         // at the location provided as an argument to this method
         //
@@ -1109,7 +1125,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         let tcx = self.tcx();
         for user_annotation in self.user_type_annotations {
             let CanonicalUserTypeAnnotation { span, ref user_ty, inferred_ty } = *user_annotation;
-            let annotation = self.instantiate_canonical_with_fresh_inference_vars(span, user_ty);
+            let annotation = self.instantiate_canonical(span, user_ty);
             if let ty::UserType::TypeOf(def, args) = annotation
                 && let DefKind::InlineConst = tcx.def_kind(def)
             {
@@ -2000,7 +2016,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                     ConstraintCategory::SizedBound,
                 );
             }
-            &Rvalue::NullaryOp(NullOp::UbCheck(_), _) => {}
+            &Rvalue::NullaryOp(NullOp::UbChecks, _) => {}
 
             Rvalue::ShallowInitBox(operand, ty) => {
                 self.check_operand(operand, location);
@@ -2157,15 +2173,12 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                     }
 
                     CastKind::PointerCoercion(PointerCoercion::MutToConstPointer) => {
-                        let ty::RawPtr(ty::TypeAndMut { ty: ty_from, mutbl: hir::Mutability::Mut }) =
-                            op.ty(body, tcx).kind()
+                        let ty::RawPtr(ty_from, hir::Mutability::Mut) = op.ty(body, tcx).kind()
                         else {
                             span_mirbug!(self, rvalue, "unexpected base type for cast {:?}", ty,);
                             return;
                         };
-                        let ty::RawPtr(ty::TypeAndMut { ty: ty_to, mutbl: hir::Mutability::Not }) =
-                            ty.kind()
-                        else {
+                        let ty::RawPtr(ty_to, hir::Mutability::Not) = ty.kind() else {
                             span_mirbug!(self, rvalue, "unexpected target type for cast {:?}", ty,);
                             return;
                         };
@@ -2190,12 +2203,10 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                         let ty_from = op.ty(body, tcx);
 
                         let opt_ty_elem_mut = match ty_from.kind() {
-                            ty::RawPtr(ty::TypeAndMut { mutbl: array_mut, ty: array_ty }) => {
-                                match array_ty.kind() {
-                                    ty::Array(ty_elem, _) => Some((ty_elem, *array_mut)),
-                                    _ => None,
-                                }
-                            }
+                            ty::RawPtr(array_ty, array_mut) => match array_ty.kind() {
+                                ty::Array(ty_elem, _) => Some((ty_elem, *array_mut)),
+                                _ => None,
+                            },
                             _ => None,
                         };
 
@@ -2210,9 +2221,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                         };
 
                         let (ty_to, ty_to_mut) = match ty.kind() {
-                            ty::RawPtr(ty::TypeAndMut { mutbl: ty_to_mut, ty: ty_to }) => {
-                                (ty_to, *ty_to_mut)
-                            }
+                            ty::RawPtr(ty_to, ty_to_mut) => (ty_to, *ty_to_mut),
                             _ => {
                                 span_mirbug!(
                                     self,
@@ -2252,7 +2261,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                         }
                     }
 
-                    CastKind::PointerExposeAddress => {
+                    CastKind::PointerExposeProvenance => {
                         let ty_from = op.ty(body, tcx);
                         let cast_ty_from = CastTy::from_ty(ty_from);
                         let cast_ty_to = CastTy::from_ty(*ty);
@@ -2262,7 +2271,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                                 span_mirbug!(
                                     self,
                                     rvalue,
-                                    "Invalid PointerExposeAddress cast {:?} -> {:?}",
+                                    "Invalid PointerExposeProvenance cast {:?} -> {:?}",
                                     ty_from,
                                     ty
                                 )
@@ -2270,7 +2279,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                         }
                     }
 
-                    CastKind::PointerFromExposedAddress => {
+                    CastKind::PointerWithExposedProvenance => {
                         let ty_from = op.ty(body, tcx);
                         let cast_ty_from = CastTy::from_ty(ty_from);
                         let cast_ty_to = CastTy::from_ty(*ty);
@@ -2280,7 +2289,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                                 span_mirbug!(
                                     self,
                                     rvalue,
-                                    "Invalid PointerFromExposedAddress cast {:?} -> {:?}",
+                                    "Invalid PointerWithExposedProvenance cast {:?} -> {:?}",
                                     ty_from,
                                     ty
                                 )
@@ -2413,7 +2422,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 let ty_left = left.ty(body, tcx);
                 match ty_left.kind() {
                     // Types with regions are comparable if they have a common super-type.
-                    ty::RawPtr(_) | ty::FnPtr(_) => {
+                    ty::RawPtr(_, _) | ty::FnPtr(_) => {
                         let ty_right = right.ty(body, tcx);
                         let common_ty = self.infcx.next_ty_var(TypeVariableOrigin {
                             kind: TypeVariableOriginKind::MiscVariable,

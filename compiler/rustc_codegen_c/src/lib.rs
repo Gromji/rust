@@ -2,27 +2,23 @@
 #![cfg_attr(doc, feature(rustdoc_internals))]
 #![feature(rustc_private)]
 
-extern crate rustc_abi;
 extern crate rustc_codegen_ssa;
 extern crate rustc_data_structures;
-extern crate rustc_driver;
-extern crate rustc_errors;
-extern crate rustc_hir;
-extern crate rustc_index;
 extern crate rustc_metadata;
 extern crate rustc_middle;
 extern crate rustc_session;
 extern crate rustc_span;
-extern crate rustc_symbol_mangling;
-extern crate rustc_target;
-extern crate rustc_ty_utils;
-extern crate stable_mir;
 
-use rustc_codegen_ssa::traits::CodegenBackend;
-use rustc_codegen_ssa::{CodegenResults, CrateInfo};
+use base::OngoingCodegen;
+
+use rustc_codegen_ssa::{traits::CodegenBackend, CrateInfo};
+
 use rustc_data_structures::fx::FxIndexMap;
+use rustc_metadata::EncodedMetadata;
 use rustc_session::Session;
-use std::any::Any;
+use std::{any::Any, path::Path};
+
+mod base;
 
 pub struct CCodegenBackend(());
 
@@ -40,13 +36,7 @@ impl CodegenBackend for CCodegenBackend {
         metadata: rustc_metadata::EncodedMetadata,
         need_metadata_module: bool,
     ) -> Box<dyn Any> {
-        Box::new(CodegenResults {
-            modules: vec![],
-            allocator_module: None,
-            metadata_module: None,
-            metadata,
-            crate_info: CrateInfo::new(tcx, "none".to_string()),
-        })
+        base::run(tcx, metadata)
     }
 
     #[allow(unused)]
@@ -62,10 +52,13 @@ impl CodegenBackend for CCodegenBackend {
             rustc_middle::dep_graph::WorkProduct,
         >,
     ) {
-        let codegen_results = ongoing_codegen
-            .downcast::<CodegenResults>()
-            .expect("in join_codegen: ongoing_codegen is not a CodegenResults");
-        (*codegen_results, FxIndexMap::default())
+        let (name, ongoing_codegen, metadata, crate_info) = *ongoing_codegen
+            .downcast::<(String, OngoingCodegen, EncodedMetadata, CrateInfo)>()
+            .expect("in join_codegen: ongoing_codegen is not a OngoingCodegen");
+        (
+            ongoing_codegen.join(name, &ongoing_codegen, metadata, crate_info, outputs),
+            FxIndexMap::default(),
+        )
     }
 
     #[allow(unused)]
@@ -84,12 +77,23 @@ impl CodegenBackend for CCodegenBackend {
         let output_name = out_filename(sess, CrateType::Executable, &outputs, crate_name);
         match output_name {
             OutFileName::Real(ref path) => {
-                let mut out_file = ::std::fs::File::create(path).unwrap();
-                write!(out_file, "This has been \"compiled\" successfully.").unwrap();
+                let tmp_path = codegen_results.modules[0].object.as_ref().unwrap();
+
+                // rename to out_file
+                let tmp_path = Path::new(tmp_path);
+                std::fs::rename(tmp_path, path.with_extension("c")).unwrap();
             }
             OutFileName::Stdout => {
                 let mut stdout = std::io::stdout();
-                write!(stdout, "This has been \"compiled\" successfully.").unwrap();
+                let tmp_path = codegen_results.modules[0].object.as_ref().unwrap();
+
+                // print contents of tmp_path to stdout
+                let tmp_path = Path::new(tmp_path);
+                let contents = std::fs::read_to_string(tmp_path).unwrap();
+                stdout.write_all(contents.as_bytes()).unwrap();
+
+                // remove tmp_path
+                std::fs::remove_file(tmp_path).unwrap();
             }
         }
         Ok(())

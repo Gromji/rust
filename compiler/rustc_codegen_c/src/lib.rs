@@ -27,6 +27,9 @@ impl CodegenBackend for CCodegenBackend {
         ""
     }
 
+    // I think we can use this function to configure anything we want.
+    // One way of doing it is to somehow use opts from sess (not sure how yet) to configure the backend
+    // We can create a struct to hold the configuration and store it in CCodegenBackend
     fn init(&self, _sess: &Session) {}
 
     #[allow(unused)]
